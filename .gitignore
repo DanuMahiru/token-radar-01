@@ -1,0 +1,5 @@
+kit/
+out/
+.shot-tools/
+node_modules/
+*.log
