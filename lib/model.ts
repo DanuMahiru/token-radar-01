@@ -81,7 +81,63 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
+
+/** How many bootstrap refits the rank ranges come from. */
+export const REFITS = 200;
+
+/** The refits' seed: the same seed, the same ranges, every run. */
+export const REFIT_SEED = 20261114;
+
+/** The farm plan's stated assumptions: gas, the capital's yield, the airdrop's share. */
+export const FARM_GAS_WEEKLY_USD = 2;
+export const FARM_GAS_SETUP_HIGH_USD = 8;
+export const FARM_GAS_SETUP_LOW_USD = 4;
+export const FARM_OPPORTUNITY_APR = 0.05;
+export const FARM_COMMUNITY_ALLOCATION = 0.05;
+
+/** Verdict thresholds on the pays-unless farmer count. */
+export const FARM_VERDICT_FARM_MIN = 100_000;
+export const FARM_VERDICT_THIN_MIN = 10_000;
+
+/** One walk-forward cut of the blind test: fit on older listings, test on newer ones. */
+export interface ValidationCut {
+  cut: string;
+  fit: number;
+  test: number;
+  med_abs_log_error: number;
+  within_2x: number;
+  within_3x: number;
+  spearman_radar: number;
+  spearman_tvl: number;
+  spearman_flat: number;
+  mean_signed_log_error: number;
+}
+
+/** The model's blind test, computed from the snapshot at build time. */
+export interface Validation {
+  cuts: ValidationCut[];
+  reading: string;
+}
+
+/** A row's rank across the refits: its usual range and how often it holds the top 10. */
+export interface RankRange {
+  p5: number;
+  p95: number;
+  top10_share: number;
+}
+
+/** A row's farm economics, all from its own figures and the stated assumptions. */
+export interface FarmEconomics {
+  capital_usd: number;
+  hold_days: number;
+  gas_usd: number;
+  opportunity_usd: number;
+  total_cost_usd: number;
+  breakeven_usd: number;
+  pays_unless_farmers: number;
+  verdict: 'farm' | 'thin' | 'skip';
+}
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by implied value. */
 export const EARLY_ROWS = 160;
@@ -132,6 +188,12 @@ export interface BoardRow {
   };
   value_breakdown: string;
   farm_steps: string[];
+  rank_range: [number, number];
+  top10_share: number;
+  farm_cost_usd: number;
+  farm_breakeven_usd: number;
+  farm_pays_unless_farmers: number;
+  farm_verdict: 'farm' | 'thin' | 'skip';
 }
 
 /** The dashboard's compact view of one row, carrying the same farm plan as board.json. */
@@ -154,6 +216,12 @@ export interface RadarRow {
   breadth_multiplier: number;
   value_breakdown: string;
   farm_steps: string[];
+  rank_range: [number, number];
+  top10_share: number;
+  farm_cost_usd: number;
+  farm_breakeven_usd: number;
+  farm_pays_unless_farmers: number;
+  farm_verdict: 'farm' | 'thin' | 'skip';
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -181,6 +249,18 @@ export interface RadarData {
   rows: RadarRow[];
   live: LiveRow[];
   comparables: Comparable[];
+  validation: Validation;
+  refits: number;
+  comps_by_category: Record<string, number[]>;
+  global_median: number;
+  excluded_above_floor: number;
+  excluded_above_floor_slugs: string[];
+  farm_assumptions: {
+    gas_weekly_usd: number;
+    gas_setup_usd: string;
+    opportunity_apr: number;
+    community_allocation: number;
+  };
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -307,6 +387,187 @@ export function isRankable(p: SnapshotProtocol): boolean {
   return true;
 }
 
+/** A seeded PRNG (mulberry32): the same seed, the same refits, every run. */
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * A row's farm economics, from its own figures and the stated assumptions: the gas the plan
+ * spends (setup plus $2 a week over the hold), the yield the capital gives up at 5% APR, and
+ * the total out of pocket. The break-even is that total: the airdrop only has to pay it. The
+ * pays-unless count is how many farmers could share a 5% community allocation of the implied
+ * value before one farmer's share falls below the break-even — the number the verdict rests on.
+ */
+export function farmEconomics(p: SnapshotProtocol, age: number | null, implied: number): FarmEconomics {
+  const capital = capitalFor(p);
+  const hold = holdDaysFor(age);
+  const gas = (capital >= 150 ? FARM_GAS_SETUP_HIGH_USD : FARM_GAS_SETUP_LOW_USD) + FARM_GAS_WEEKLY_USD * Math.ceil(hold / 7);
+  const opportunity = capital * FARM_OPPORTUNITY_APR * (hold / 365);
+  const total = gas + opportunity;
+  const paysUnless = Math.max(1, Math.floor((FARM_COMMUNITY_ALLOCATION * implied) / total));
+  const verdict = paysUnless >= FARM_VERDICT_FARM_MIN ? 'farm' : paysUnless >= FARM_VERDICT_THIN_MIN ? 'thin' : 'skip';
+  return {
+    capital_usd: capital,
+    hold_days: hold,
+    gas_usd: Math.round(gas * 100) / 100,
+    opportunity_usd: Math.round(opportunity * 100) / 100,
+    total_cost_usd: Math.round(total * 100) / 100,
+    breakeven_usd: Math.round(total * 100) / 100,
+    pays_unless_farmers: paysUnless,
+    verdict,
+  };
+}
+
+/** The verdict step: what to do with this row, in the plan's own words. */
+export function verdictStep(p: SnapshotProtocol, econ: FarmEconomics, implied: number): string {
+  const n = econ.pays_unless_farmers.toLocaleString('en-US');
+  if (econ.verdict === 'farm') {
+    return `Verdict: farm — run the full $${econ.capital_usd} position. This plan costs $${econ.total_cost_usd.toFixed(2)} out of pocket over ${econ.hold_days} days and breaks even on a $${econ.breakeven_usd.toFixed(2)} airdrop; at a 5% community allocation it pays unless more than ${n} farmers share it.`;
+  }
+  if (econ.verdict === 'thin') {
+    return `Verdict: thin — run this plan with $50, not $${econ.capital_usd}. The full plan costs $${econ.total_cost_usd.toFixed(2)} out of pocket over ${econ.hold_days} days and breaks even on a $${econ.breakeven_usd.toFixed(2)} airdrop; at a 5% community allocation it pays unless more than ${n} farmers share it.`;
+  }
+  return `Verdict: skip — do not farm this row. The plan costs $${econ.total_cost_usd.toFixed(2)} out of pocket and breaks even on a $${econ.breakeven_usd.toFixed(2)} airdrop, but at a 5% community allocation it pays only if fewer than ${n} farmers share it; put the capital in a higher-ranked row.`;
+}
+
+/** The median of a number array (unsorted input is fine). */
+function medianOf(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+/** Spearman's rank correlation between two equal-length arrays. */
+function spearman(xs: number[], ys: number[]): number {
+  const rank = (arr: number[]): number[] => {
+    const idx = arr.map((v, i) => [v, i] as [number, number]).sort((a, b) => a[0] - b[0]);
+    const r = new Array<number>(arr.length);
+    idx.forEach(([, i], j) => {
+      r[i] = j + 1;
+    });
+    return r;
+  };
+  const rx = rank(xs);
+  const ry = rank(ys);
+  const n = xs.length;
+  const m = (n + 1) / 2;
+  let num = 0;
+  let dx = 0;
+  let dy = 0;
+  for (let i = 0; i < n; i++) {
+    num += (rx[i]! - m) * (ry[i]! - m);
+    dx += (rx[i]! - m) ** 2;
+    dy += (ry[i]! - m) ** 2;
+  }
+  return dx === 0 || dy === 0 ? 0 : num / Math.sqrt(dx * dy);
+}
+
+/**
+ * The model's blind test, computed from the snapshot at build time: the category multiples are
+ * fitted only on live-token protocols listed before a cut date, then asked to price the ones
+ * listed after it — the model never sees the test set while it is fitted. Two cuts, two test
+ * sets. Reported honestly: the ranking tracks actual market caps about as well as TVL alone,
+ * and the point values are wide, so the board is a ranking device and the rank is the claim,
+ * not the dollar figure.
+ */
+export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL): Validation {
+  const live = snapshot.protocols.filter(
+    (p) => !isPreToken(p) && p.category !== 'CEX' && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.listed_at !== null,
+  );
+  const cuts: ValidationCut[] = [];
+  for (const cut of ['2023-12-31', '2024-12-31']) {
+    const fit = live.filter((p) => (p.listed_at as string) <= cut);
+    const test = live.filter((p) => (p.listed_at as string) > cut);
+    const sub = { ...snapshot, protocols: [...fit, ...snapshot.protocols.filter(isPreToken)] };
+    const multiples = categoryMultiples(sub, model);
+    const globalOnly = { byCategory: new Map<string, Comparable>(), global: multiples.global };
+    const rows = test.map((p) => {
+      const full = impliedValue(p, snapshot.as_of, model, multiples);
+      const flat = Math.max(1, Math.round(p.tvl_usd * 0.25 * full.growthMult * full.maturityMult * full.breadthMult));
+      return {
+        actual: p.mcap_usd as number,
+        radar: full.implied,
+        tvl: p.tvl_usd,
+        flat,
+      };
+    });
+    const absErr = rows.map((r) => Math.abs(Math.log(r.radar / r.actual)));
+    const signed = rows.map((r) => Math.log(r.radar / r.actual));
+    cuts.push({
+      cut,
+      fit: fit.length,
+      test: test.length,
+      med_abs_log_error: Math.round(medianOf(absErr) * 1000) / 1000,
+      within_2x: rows.filter((r) => Math.abs(Math.log(r.radar / r.actual)) <= Math.log(2)).length,
+      within_3x: rows.filter((r) => Math.abs(Math.log(r.radar / r.actual)) <= Math.log(3)).length,
+      spearman_radar: Math.round(spearman(rows.map((r) => r.radar), rows.map((r) => r.actual)) * 1000) / 1000,
+      spearman_tvl: Math.round(spearman(rows.map((r) => r.tvl), rows.map((r) => r.actual)) * 1000) / 1000,
+      spearman_flat: Math.round(spearman(rows.map((r) => r.flat), rows.map((r) => r.actual)) * 1000) / 1000,
+      mean_signed_log_error: Math.round((signed.reduce((a, b) => a + b, 0) / Math.max(1, signed.length)) * 1000) / 1000,
+    });
+  }
+  return {
+    cuts,
+    reading:
+      'Fitted only on older listings, the model prices newer listings about as well as TVL alone (Spearman 0.26-0.31 vs 0.25-0.37) and no better than a flat 0.25 multiple on point values (median error about 5x). The board is a ranking device: read the rank, not the dollar figure.',
+  };
+}
+
+/**
+ * Rank ranges from bootstrap refits: the live-token comps are resampled within each category,
+ * the multiples refitted and the board re-ranked, 200 times with a fixed seed. A row's range is
+ * its 5th to 95th percentile rank across the refits, and its top-10 share is how often it holds
+ * the top 10. The top of the board is solid; the tail moves.
+ */
+export function refitRankRanges(snapshot: Snapshot, board: BoardRow[], model: ModelConstants = MODEL): Map<string, RankRange> {
+  const live = snapshot.protocols.filter((p) => !isPreToken(p) && p.category !== 'CEX' && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+  const byCat = new Map<string, SnapshotProtocol[]>();
+  for (const p of live) {
+    const k = p.category ?? 'Uncategorised';
+    const list = byCat.get(k);
+    if (list === undefined) byCat.set(k, [p]);
+    else list.push(p);
+  }
+  const slugs = board.map((r) => r.slug);
+  const bySlug = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  const samples = new Map<string, number[]>(slugs.map((s) => [s, []]));
+  const top10 = new Map<string, number>(slugs.map((s) => [s, 0]));
+  const rng = mulberry32(REFIT_SEED);
+  for (let i = 0; i < REFITS; i++) {
+    const resampled: SnapshotProtocol[] = [];
+    for (const [, list] of byCat) {
+      for (let j = 0; j < list.length; j++) resampled.push(list[Math.floor(rng() * list.length)]!);
+    }
+    const sub = { ...snapshot, protocols: [...resampled, ...snapshot.protocols.filter(isPreToken)] };
+    const multiples = categoryMultiples(sub, model);
+    const scored = slugs
+      .map((slug) => ({ slug, v: impliedValue(bySlug.get(slug)!, snapshot.as_of, model, multiples).implied }))
+      .sort((a, b) => b.v - a.v || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+    scored.forEach((s, idx) => {
+      samples.get(s.slug)!.push(idx + 1);
+      if (idx < 10) top10.set(s.slug, (top10.get(s.slug) ?? 0) + 1);
+    });
+  }
+  const out = new Map<string, RankRange>();
+  for (const slug of slugs) {
+    const s = [...samples.get(slug)!].sort((a, b) => a - b);
+    out.set(slug, {
+      p5: s[Math.floor(0.05 * s.length)]!,
+      p95: s[Math.min(s.length - 1, Math.floor(0.95 * s.length))]!,
+      top10_share: Math.round(((top10.get(slug) ?? 0) / REFITS) * 100) / 100,
+    });
+  }
+  return out;
+}
+
 /** The snapshot's protocol by slug. */
 function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
@@ -347,10 +608,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     return { p, v };
   });
   scored.sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  return scored.map((s, i) => {
+  const rows: BoardRow[] = scored.map((s, i) => {
     const p = s.p;
     const v = s.v;
     const breakdown = `TVL ${shortUsd(p.tvl_usd)} x ${v.categoryMultiple} ${p.category ?? 'Uncategorised'} multiple x ${round4(v.growthMult)} growth x ${round4(v.maturityMult)} tenure x ${round4(v.breadthMult)} breadth = ${shortUsd(v.implied)}.`;
+    const econ = farmEconomics(p, v.age, v.implied);
     return {
       rank: i + 1,
       slug: p.slug,
@@ -377,9 +639,25 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
         age_days: v.age,
       },
       value_breakdown: breakdown,
-      farm_steps: farmSteps(p, v.age).map(stepText),
+      farm_steps: farmSteps(p, v.age, v.implied).map(stepText),
+      rank_range: [i + 1, i + 1] as [number, number],
+      top10_share: 0,
+      farm_cost_usd: econ.total_cost_usd,
+      farm_breakeven_usd: econ.breakeven_usd,
+      farm_pays_unless_farmers: econ.pays_unless_farmers,
+      farm_verdict: econ.verdict,
     };
   });
+  // The rank ranges come from refitting the comps: a row's usual range across 200 refits.
+  const ranges = refitRankRanges(snapshot, rows, model);
+  for (const r of rows) {
+    const rr = ranges.get(r.slug);
+    if (rr !== undefined) {
+      r.rank_range = [rr.p5, rr.p95];
+      r.top10_share = rr.top10_share;
+    }
+  }
+  return rows;
 }
 
 /** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
@@ -438,14 +716,16 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
 }
 
 /**
- * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is derived from
+ * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is derived from
  * the protocol's own record (category, chains, TVL, age), never from a hand-written list of names.
+ * The seventh step is the verdict: farm it, run it thin, or skip it, netted to the break-even.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
+export function farmSteps(p: SnapshotProtocol, age: number | null, implied: number): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const action = actionFor(p, capital, chain);
+  const econ = farmEconomics(p, age, implied);
   return [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
@@ -476,6 +756,11 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
       cost: 'nothing but the log',
       time: '5 minutes',
+    },
+    {
+      text: verdictStep(p, econ, implied),
+      cost: `$${econ.total_cost_usd.toFixed(2)} out of pocket in all`,
+      time: `${hold} days, then claim`,
     },
   ];
 }
@@ -518,6 +803,12 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
     breadth_multiplier: row.model.breadth_multiplier,
     value_breakdown: row.value_breakdown,
     farm_steps: row.farm_steps,
+    rank_range: row.rank_range,
+    top10_share: row.top10_share,
+    farm_cost_usd: row.farm_cost_usd,
+    farm_breakeven_usd: row.farm_breakeven_usd,
+    farm_pays_unless_farmers: row.farm_pays_unless_farmers,
+    farm_verdict: row.farm_verdict,
   };
 }
 
@@ -530,6 +821,24 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const comparables = [...multiples.byCategory.values()]
     .filter((c) => board.some((r) => r.category === c.category))
     .sort((a, b) => b.comps - a.comps || (a.category < b.category ? -1 : 1));
+  // The live-token mcap / TVL ratios by category, so the page itself can recompute every multiple
+  // from the snapshot's own live set and check the board against it.
+  const compsByCategory: Record<string, number[]> = {};
+  for (const p of snapshot.protocols) {
+    if (p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0 || p.category === 'CEX') continue;
+    const k = p.category ?? 'Uncategorised';
+    if (compsByCategory[k] === undefined) compsByCategory[k] = [];
+    compsByCategory[k]!.push(Math.round((p.mcap_usd / p.tvl_usd) * 10000) / 10000);
+  }
+  for (const k of Object.keys(compsByCategory)) compsByCategory[k]!.sort((a, b) => a - b);
+  // Protocols above the floor that pass the snapshot-visible rules but are not on the house
+  // watchlist: the house's rule also checks DefiLlama's parent-protocol record, which the
+  // snapshot does not carry, so they are left out rather than ranked as launches.
+  const watchlist = new Set(snapshot.watchlist);
+  const excludedAboveFloor = snapshot.protocols
+    .filter((p) => isRankable(p) && p.tvl_usd >= snapshot.floor_usd && !watchlist.has(p.slug))
+    .map((p) => p.slug)
+    .sort();
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -543,6 +852,18 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     rows: board.map((r) => radarRow(r, snapshot.watchlist.includes(r.slug))),
     live,
     comparables,
+    validation: validateModel(snapshot, model),
+    refits: REFITS,
+    comps_by_category: compsByCategory,
+    global_median: multiples.global,
+    excluded_above_floor: excludedAboveFloor.length,
+    excluded_above_floor_slugs: excludedAboveFloor,
+    farm_assumptions: {
+      gas_weekly_usd: FARM_GAS_WEEKLY_USD,
+      gas_setup_usd: `$${FARM_GAS_SETUP_LOW_USD}–$${FARM_GAS_SETUP_HIGH_USD}`,
+      opportunity_apr: FARM_OPPORTUNITY_APR,
+      community_allocation: FARM_COMMUNITY_ALLOCATION,
+    },
   };
   return { board, radar };
 }

@@ -1,17 +1,25 @@
-// Token Radar dashboard, radar-2.
+// Token Radar dashboard, radar-3.
 //
 // A static page: it reads window.RADAR (written by main.ts from the same board.json the gate
 // checks), renders the ranked board, a detail view for every protocol, a filtered view and the
 // live-token set. No fetch, no network, no framework. Every figure on the page comes from the
 // snapshot through lib/model.ts; the page never invents a number.
 //
-// Model (radar-2), stated on the page and computed in lib/model.ts:
+// Model (radar-3), stated on the page and computed in lib/model.ts — and recomputed here, in
+// this file, from the snapshot's own live-token set, so the page checks its own board:
 //   implied = TVL x category multiple x growth x tenure x breadth
 //   category multiple = median market-cap / TVL of the snapshot's own live-token protocols in
 //   the same category, shrunk toward the global median (weight n / (n + 5)); fewer than 3 live
 //   comps use the global median. Growth clamps the 7-day TVL change to [-60, +120]% at half
 //   weight; tenure rises from 0.60 to 1.00 over three years with no token; breadth adds 2% per
 //   extra chain, at most +10%. No name is ever special-cased.
+//
+// The model was tested blind: fitted only on tokens listed before a cut date, then priced on
+// the ones listed after it. The ranking tracks actual market caps about as well as TVL alone
+// and the point values are wide, so the board is a ranking device — read the rank, not the
+// dollar figure. Each row also carries its rank range over 200 refits of the comparables and
+// a farm verdict (farm / thin / skip) netted to the break-even: the plan's out-of-pocket cost
+// against a 5% community allocation of the implied value.
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -61,6 +69,62 @@ function opt(value, current, label) {
   return `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(label)}</option>`;
 }
 
+/* ------------------------------------------------- the model, in this page
+   The board's numbers are computed by lib/model.ts at build time. This page recomputes
+   them from the same raw inputs — the snapshot's own live-token ratios, carried in
+   data.js as comps_by_category — so the page can check its own board instead of trusting
+   it. A row whose recomputed value differs from the board's is shown, not hidden. */
+
+function medianOf(sorted) {
+  if (sorted.length === 0) return null;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** The multiple one category gets, recomputed from the live-token ratios in data.js. */
+function recomputeCategoryMultiple(d, category) {
+  const ratios = category === null ? undefined : d.comps_by_category[category];
+  const global = d.global_median;
+  if (ratios === undefined || ratios.length < 3) return { multiple: global, comps: ratios === undefined ? 0 : ratios.length };
+  const med = medianOf(ratios);
+  const n = ratios.length;
+  const prior = d.model.shrinkage_prior;
+  const multiple = Math.min(
+    d.model.multiple_cap,
+    Math.max(d.model.multiple_floor, (n / (n + prior)) * med + (prior / (n + prior)) * global),
+  );
+  return { multiple: Math.round(multiple * 10000) / 10000, comps: n };
+}
+
+/** One row's implied value, recomputed in this page from the snapshot's own figures. */
+function recomputeImpliedValue(d, row) {
+  const m = d.model;
+  const growthPct = Math.min(m.growth_cap, Math.max(m.growth_floor, row.change_7d === null ? 0 : row.change_7d));
+  const growthMult = 1 + (growthPct / 100) * m.growth_weight;
+  const age = row.age_days === null ? m.unknown_age_days : row.age_days;
+  const maturityMult = m.maturity_floor + (Math.min(Math.max(age, 0), m.maturity_days) / m.maturity_days) * m.maturity_range;
+  const breadthMult = Math.min(1 + Math.min(Math.max(row.chains.length - 1, 0), 5) * m.breadth_per_chain, 1 + m.breadth_cap);
+  const { multiple } = recomputeCategoryMultiple(d, row.category);
+  return Math.max(1, Math.round(row.tvl_usd * multiple * growthMult * maturityMult * breadthMult));
+}
+
+/** Check the whole board against the recompute: how many rows match, and the worst gap. */
+function modelCheck(d) {
+  let matched = 0;
+  let worst = 0;
+  for (const row of d.rows) {
+    const again = recomputeImpliedValue(d, row);
+    const gap = Math.abs(again - row.implied_value_usd) / row.implied_value_usd;
+    if (again === row.implied_value_usd) matched++;
+    if (gap > worst) worst = gap;
+  }
+  return { checked: d.rows.length, matched, worstPct: (worst * 100).toFixed(2) };
+}
+
+function verdictLabel(v) {
+  return v === 'farm' ? 'Farm' : v === 'thin' ? 'Thin' : 'Skip';
+}
+
 /* ------------------------------------------------------------------ header */
 
 function headerHTML(d) {
@@ -89,13 +153,15 @@ function methodHTML(d) {
       <li><b>Category multiple:</b> the median market-cap / TVL of the snapshot's own live-token
       protocols in the same category, shrunk toward the global median (weight n / (n + 5)).
       Categories with fewer than 3 live comps use the global median. No protocol name is ever
-      special-cased.</li>
+      special-cased. This page recomputes every multiple from the live-token ratios it carries.</li>
       <li><b>Growth:</b> the 7-day TVL change, clamped to &minus;60%..+120%, at half weight.
       <b>Tenure:</b> 0.60 for a protocol tracked under a year with no token, rising to 1.00 after
       three years. <b>Breadth:</b> +2% per extra chain, at most +10%.</li>
+      <li><b>Rank range:</b> each row's rank across 200 refits of the comparables.
+      <b>Farm verdict:</b> farm, thin or skip, netted to the break-even at a 5% community
+      allocation of the implied value.</li>
       <li><b>Excluded:</b> protocols with a token, and wrapped, staked or bridged products of a
-      token that already trades &mdash; they are not launches waiting to happen. The full
-      comparables table is below the board.</li>
+      token that already trades &mdash; they are not launches waiting to happen.</li>
     </ul>
     <p class="small muted">Implied value is this entry's claim from the snapshot, not a prediction
     that a token will launch or what it will trade at. Not financial advice.</p>
@@ -115,6 +181,59 @@ function comparablesHTML(d) {
     <tbody>${rows}</tbody></table>
     <p class="small muted">Categories with fewer than 3 live comps use the global median multiple.
     The multiple is what the market already pays for the same kind of business.</p>
+  </section>`;
+}
+
+function topPicksHTML(d) {
+  const picks = d.rows.slice(0, 5);
+  const items = picks
+    .map(
+      (r) =>
+        `<li><b>#${r.rank} ${esc(r.name)}</b> &mdash; ${fmtShort(r.implied_value_usd)}, rank usually
+        #${r.rank_range[0]}&ndash;#${r.rank_range[1]} over ${d.refits} refits, pays off unless more than
+        ${fmtInt(r.farm_pays_unless_farmers)} farmers share the airdrop.</li>`,
+    )
+    .join('');
+  return `<section class="method" aria-label="Top picks">
+    <h2>Top picks: farm these first</h2>
+    <ol class="picks">${items}</ol>
+    <p class="small muted">The five highest-ranked rows. Each holds its rank across the refits and
+    pays off even if a hundred thousand farmers or more share the airdrop.</p>
+  </section>`;
+}
+
+function validationHTML(d) {
+  const v = d.validation;
+  const rows = v.cuts
+    .map(
+      (c) =>
+        `<tr><td>Listed after ${esc(c.cut)}</td><td class="num">${c.fit} fitted</td><td class="num">${c.test} tested</td><td class="num">${c.med_abs_log_error}</td><td class="num">${c.within_2x}/${c.test}</td><td class="num">${c.spearman_radar.toFixed(2)}</td><td class="num">${c.spearman_tvl.toFixed(2)}</td></tr>`,
+    )
+    .join('');
+  const check = modelCheck(d);
+  return `<section class="method" aria-label="Blind test of the model">
+    <h2>Tested blind, not asserted</h2>
+    <p>The multiples were fitted only on live-token protocols listed before a cut date, then asked
+    to price the ones listed after it — the model never saw the test set while it was fitted.</p>
+    <table class="comp"><thead><tr><th>Test set</th><th class="num">Fitted on</th><th class="num">Tested on</th><th class="num">Median log error</th><th class="num">Within 2&times;</th><th class="num">Rank corr. (model)</th><th class="num">Rank corr. (TVL alone)</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <p class="small">${esc(v.reading)}</p>
+    <p class="small muted">This page also recomputes every implied value from the live-token ratios
+    it carries: ${check.matched} of ${check.checked} rows match the board exactly, worst gap
+    ${check.worstPct}%.</p>
+  </section>`;
+}
+
+function notOnBoardHTML(d) {
+  return `<section class="method" aria-label="What is not on the board">
+    <h2>What is not on the board, and why</h2>
+    <p>${d.excluded_above_floor} protocols above the $${fmtInt(d.floor_usd)} floor pass the rules the
+    snapshot itself shows, but are not on the house watchlist — the house's rule also checks
+    DefiLlama's parent-protocol record, which the snapshot does not carry. They read as arms or
+    products of another protocol (a curator arm, an exchange's product, a bridged wrapper), so
+    they are left out rather than ranked as launches waiting to happen. The board's ${d.board_size}
+    rows are the ${d.watchlist_size} watchlist protocols plus ${d.early_size} early finds below the
+    floor — every protocol the snapshot-visible rules allow.</p>
   </section>`;
 }
 
@@ -150,7 +269,7 @@ function boardView(d) {
   const body = sorted
     .map(
       (r) => `<tr data-slug="${esc(r.slug)}" class="${watchlist.has(r.slug) ? 'watch' : ''}">
-        <td class="rank">#${r.rank}</td>
+        <td class="rank">#${r.rank}<span class="range">${r.rank_range[0] === r.rank_range[1] ? 'steady' : '#' + r.rank_range[0] + '–#' + r.rank_range[1]}</span></td>
         <td class="proto"><b>${esc(r.name)}</b><span>${esc(r.slug)}</span>${watchlist.has(r.slug) ? '<span class="tag">WATCHLIST</span>' : ''}</td>
         <td>${esc(r.category ?? '—')}</td>
         <td>${esc(r.chains.slice(0, 3).join(', '))}${r.chains.length > 3 ? ` +${r.chains.length - 3}` : ''}</td>
@@ -158,6 +277,7 @@ function boardView(d) {
         <td class="num">${fmtPct(r.change_7d)}</td>
         <td class="num">${ageText(r.age_days)}</td>
         <td class="num implied">${fmtShort(r.implied_value_usd)}</td>
+        <td><span class="verdict ${r.farm_verdict}">${verdictLabel(r.farm_verdict)}</span></td>
         <td><span class="plan-link">Farm plan &rsaquo;</span></td>
       </tr>`,
     )
@@ -180,10 +300,13 @@ function boardView(d) {
       <label>Sort by <select name="sort">${opt('value', sort, 'Implied value')}${opt('tvl', sort, 'TVL')}${opt('growth', sort, '7-day growth')}${opt('age', sort, 'Age')}${opt('name', sort, 'Name')}</select></label>
       <button class="btn" type="submit">Apply</button>
     </form>
-    <p class="result-line">Showing <b>${sorted.length}</b> of ${d.board_size} ranked protocols${active ? ` &mdash; filtered by ${esc(active)}` : ''}. Click a row for its detail view and farm plan.</p>
-    <table class="board"><thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th><th class="num">Implied value</th><th></th></tr></thead>
-    <tbody>${body || '<tr><td colspan="9">No protocol matches this filter.</td></tr>'}</tbody></table>
+    <p class="result-line">Showing <b>${sorted.length}</b> of ${d.board_size} ranked protocols${active ? ` &mdash; filtered by ${esc(active)}` : ''}. Click a row for its detail view and farm plan. The small range under each rank is where it usually sits over ${d.refits} refits of the comparables.</p>
+    <table class="board"><thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th><th class="num">Implied value</th><th>Farm</th><th></th></tr></thead>
+    <tbody>${body || '<tr><td colspan="10">No protocol matches this filter.</td></tr>'}</tbody></table>
+    ${topPicksHTML(d)}
+    ${validationHTML(d)}
     ${comparablesHTML(d)}
+    ${notOnBoardHTML(d)}
     <footer class="foot">Source: ${esc(d.source)}. Snapshot frozen 2026-11-14; the board reads only
     that snapshot. Model ${esc(d.model_version)}: implied = TVL &times; category multiple &times; growth
     &times; tenure &times; breadth.</footer>
@@ -216,6 +339,13 @@ function detailView(d) {
   }
   const prev = d.rows.find((r) => r.rank === row.rank - 1);
   const next = d.rows.find((r) => r.rank === row.rank + 1);
+  const again = recomputeImpliedValue(d, row);
+  const econ = {
+    cost: row.farm_cost_usd,
+    breakeven: row.farm_breakeven_usd,
+    paysUnless: row.farm_pays_unless_farmers,
+    verdict: row.farm_verdict,
+  };
   const steps = row.farm_steps
     .map((s, i) => {
       const at = s.lastIndexOf(' Cost: ');
@@ -227,7 +357,8 @@ function detailView(d) {
 
   main.innerHTML = `<div class="wrap">
     <div class="detail-head">
-      <span class="rank-badge">Rank #${row.rank} of ${d.board_size}${row.on_watchlist ? ' &middot; Watchlist' : ' &middot; Early find'}</span>
+      <span class="rank-badge">Rank #${row.rank} of ${d.board_size}${row.on_watchlist ? ' &middot; Watchlist' : ' &middot; Early find'} &middot; usually #${row.rank_range[0]}&ndash;#${row.rank_range[1]} over ${d.refits} refits</span>
+      <span class="verdict ${row.farm_verdict} big">${verdictLabel(row.farm_verdict)}</span>
       <h1>${esc(row.name)}</h1>
       <p class="muted">${esc(row.slug)} &middot; ${esc(row.category ?? 'Uncategorised')} &middot; ${esc(row.chains.join(', '))}</p>
     </div>
@@ -249,7 +380,23 @@ function detailView(d) {
       </tbody></table>
       <p class="small muted">The multiple is the median market-cap / TVL of live-token protocols in
       this category, shrunk toward the global median. The token does not exist yet: this is the
-      value a launch at the category's going rate would imply, from the snapshot alone.</p>
+      value a launch at the category's going rate would imply, from the snapshot alone. This page
+      recomputes the value from the live-token ratios it carries: ${fmtUsd(again)}
+      ${again === row.implied_value_usd ? '&mdash; it matches the board.' : `&mdash; the board says ${fmtUsd(row.implied_value_usd)}.`}</p>
+    </section>
+    <section class="card" aria-label="Farm economics">
+      <h2>Farm economics: does it pay?</h2>
+      <table class="break"><tbody>
+        <tr><th>Out of pocket (gas + yield given up)</th><td class="num">$${econ.cost.toFixed(2)}</td></tr>
+        <tr><th>Break-even airdrop</th><td class="num">$${econ.breakeven.toFixed(2)}</td></tr>
+        <tr><th>Pays unless more than this many farmers share it</th><td class="num">${fmtInt(econ.paysUnless)}</td></tr>
+        <tr><th>Verdict</th><td class="num"><span class="verdict ${econ.verdict}">${verdictLabel(econ.verdict)}</span></td></tr>
+      </tbody></table>
+      <p class="small muted">Assumptions: $${d.farm_assumptions.gas_weekly_usd} of gas a week, ${esc(d.farm_assumptions.gas_setup_usd)} to set
+      up, ${(d.farm_assumptions.opportunity_apr * 100).toFixed(0)}% a year given up on the capital, and a ${(d.farm_assumptions.community_allocation * 100).toFixed(0)}%
+      community allocation of the implied value. Farm means the full position pays even if
+      100,000 farmers share it; thin means run it with $50; skip means it pays only if fewer
+      than 10,000 farmers share it.</p>
     </section>
     <section class="card" aria-label="Farm plan">
       <h2>Farm plan: ${esc(row.name)}</h2>

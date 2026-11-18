@@ -1,4 +1,4 @@
-/* Token Radar, radar-2. One palette, one spacing scale, system type: nothing fetched. */
+/* Token Radar, radar-3. One palette, one spacing scale, system type: nothing fetched. */
 :root {
   --paper: #f6f3ec;
   --card: #fffdf7;
@@ -102,6 +102,17 @@ table.board tbody tr { cursor: pointer; }
 table.board tbody tr:hover { background: #f0ece1; }
 table.board tbody tr.watch td:first-child { border-left: 4px solid var(--amber); }
 .rank { font-weight: 800; color: var(--teal-dark); }
+.rank .range { display: block; font-size: 11px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.verdict {
+  display: inline-block; font-size: 12px; font-weight: 800; border-radius: 999px; padding: 2px 10px;
+  white-space: nowrap;
+}
+.verdict.farm { background: #dcfce7; color: var(--green); }
+.verdict.thin { background: var(--amber-bg); color: var(--amber); }
+.verdict.skip { background: #eee; color: var(--muted); }
+.verdict.big { font-size: 13px; padding: 3px 12px; margin-left: 8px; vertical-align: 2px; }
+ol.picks { margin: 0 0 8px 20px; padding: 0; }
+ol.picks li { margin-bottom: 6px; }
 .proto b { display: block; font-size: 15px; }
 .proto span { font-size: 12px; color: var(--muted); }
 .tag {
