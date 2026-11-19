@@ -1,4 +1,4 @@
-/* Token Radar, radar-3. One palette, one spacing scale, system type: nothing fetched. */
+/* Token Radar, radar-4. One palette, one spacing scale, system type: nothing fetched. */
 :root {
   --paper: #f6f3ec;
   --card: #fffdf7;
@@ -64,8 +64,13 @@ table.comp th, table.comp td { border-bottom: 1px solid var(--line); padding: 5p
 table.comp th { color: var(--muted); font-weight: 600; }
 table.comp td.num, table.comp th.num { text-align: right; }
 
-/* Tabs and controls */
-.tabs { display: flex; gap: 8px; margin: 18px 0 12px; }
+/* KPI strip */
+.kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 16px 0; }
+.kpis .stat { text-align: left; }
+.export-row { margin: 14px 0 0; display: flex; gap: 10px; flex-wrap: wrap; }
+.sluglist { font-size: 12px; color: var(--muted); word-break: break-word; }
+.controls select[multiple] { max-width: none; min-width: 260px; }
+.tabs { flex-wrap: wrap; }
 .tab {
   border: 1px solid var(--line); background: var(--card); color: var(--ink);
   border-radius: 999px; padding: 7px 16px; font: inherit; font-weight: 600; cursor: pointer;
@@ -144,4 +149,4 @@ ol.steps .cost { color: var(--muted); font-size: 13px; }
 .navrow { display: flex; justify-content: space-between; gap: 10px; margin-top: 16px; }
 footer.foot { border-top: 1px solid var(--line); margin-top: 28px; padding-top: 12px; color: var(--muted); font-size: 13px; }
 .error { background: #fdeceb; border: 1px solid var(--red); border-radius: var(--radius); padding: var(--pad); }
-@media (max-width: 760px) { .grid { grid-template-columns: repeat(2, 1fr); } h1 { font-size: 26px; } }
+@media (max-width: 760px) { .grid { grid-template-columns: repeat(2, 1fr); } .kpis { grid-template-columns: repeat(2, 1fr); } h1 { font-size: 26px; } }
