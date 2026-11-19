@@ -1,10 +1,15 @@
-// The token radar's model, radar-5: one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model, radar-6: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds
-// pre-token protocols below the watchlist floor: the early rows the radar exists to find. A protocol
-// is pre-token when its index entry records no token (no market cap, no CoinGecko id, no symbol);
-// the snapshot's live-token protocols are kept apart and shown as the market's own values, never
-// mixed into the ranked board.
+// pre-token protocols below the watchlist floor: the early rows the radar exists to find. Radar-6
+// also ranks the protocols above the floor that pass the snapshot's own pre-token rules but are
+// not on the house watchlist — in their own "Off list" scope, labelled, not silently merged —
+// because the snapshot carries no parent-protocol record to apply the house's extra rule to.
+// A protocol is pre-token when its index entry records no token (no market cap, no CoinGecko
+// id, no symbol); the snapshot's live-token protocols are kept apart and shown as the market's
+// own values, never mixed into the ranked board. Every row carries the P25–P75 value range the
+// model's own leave-one-out residuals imply, so the board shows the uncertainty, not just the
+// point value.
 //
 // Implied value follows only from the snapshot's own figures, never from a hardcoded list of names:
 //
@@ -79,7 +84,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-5';
+export const MODEL_VERSION = 'radar-6';
 
 /** How many bootstrap refits the rank ranges come from. */
 export const REFITS = 200;
@@ -136,12 +141,25 @@ export interface AblationRow {
   cuts: { cut: string; med_abs_log_error: number; spearman: number }[];
 }
 
+/** Out-of-sample coverage of the value ranges: for each cut, the ranges are built from the
+ * fit set's own leave-one-out residuals and checked against the test set's actual caps. A
+ * range that holds about half its test set inside P25–P75 and about four fifths inside
+ * P10–P90 is calibrated; one that holds far fewer is overconfident. */
+export interface RangeCalibrationRow {
+  cut: string;
+  test: number;
+  in_p25_p75: number;
+  in_p10_p90: number;
+}
+
 /** The model's blind test, computed from the snapshot at build time. */
 export interface Validation {
   cuts: ValidationCut[];
   reading: string;
   horse_race: HorseRaceRow[];
   loo: LeaveOneOut;
+  loo_residual_quantiles: { p10: number; p25: number; p75: number; p90: number };
+  range_calibration: RangeCalibrationRow[];
   ablation: AblationRow[];
 }
 
@@ -194,6 +212,7 @@ export interface Kpis {
   ranked: number;
   watchlist: number;
   early: number;
+  offlist: number;
   live_total: number;
   median_curve_multiple: number;
   top_implied_usd: number;
@@ -260,8 +279,13 @@ export interface BoardRow {
   gecko_id: string | null;
   symbol: string | null;
   token_status: 'pre-token';
+  scope: 'watchlist' | 'early' | 'off-list';
   age_days: number | null;
   implied_value_usd: number;
+  value_range_p25_usd: number;
+  value_range_p75_usd: number;
+  value_range_p10_usd: number;
+  value_range_p90_usd: number;
   model: {
     base_multiple: number;
     category_multiple: number;
@@ -294,7 +318,12 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   on_watchlist: boolean;
+  scope: 'watchlist' | 'early' | 'off-list';
   implied_value_usd: number;
+  value_range_p25_usd: number;
+  value_range_p75_usd: number;
+  value_range_p10_usd: number;
+  value_range_p90_usd: number;
   category_multiple: number;
   value_breakdown: string;
   farm_steps: string[];
@@ -328,6 +357,7 @@ export interface RadarData {
   watchlist_size: number;
   board_size: number;
   early_size: number;
+  offlist_size: number;
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
@@ -664,6 +694,13 @@ function medianOf(xs: number[]): number {
   return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }
 
+/** One quantile of a sorted array, nearest-rank: the same definition the horse-race script
+ * uses, so the dashboard's value ranges match the experiment numbers exactly. */
+function quantileOf(sorted: number[], prob: number): number {
+  if (sorted.length === 0) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor(prob * sorted.length))]!;
+}
+
 /** Spearman's rank correlation between two equal-length arrays. */
 function spearman(xs: number[], ys: number[]): number {
   const rank = (arr: number[]): number[] => {
@@ -760,6 +797,31 @@ function raceEstimators(fit: SnapshotProtocol[], model: ModelConstants): Record<
   };
 }
 
+/** The leave-one-out log residuals of the shipped model, and their quantiles: the spread the
+ * value ranges are built from. One residual per dated live-token protocol, log(actual / pred)
+ * with the protocol held out of its own fit. A P25–P75 range of [implied × exp(q25),
+ * implied × exp(q75)] should hold about half of new launches; P10–P90 about four fifths. */
+export function looResidualQuantiles(snapshot: Snapshot, model: ModelConstants = MODEL): { p10: number; p25: number; p75: number; p90: number; n: number } {
+  const live = snapshot.protocols.filter(
+    (p) => !isPreToken(p) && p.category !== 'CEX' && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.listed_at !== null,
+  );
+  const residuals: number[] = [];
+  for (let i = 0; i < live.length; i++) {
+    const fit = live.filter((_, j) => j !== i);
+    const p = live[i]!;
+    const curves = sizeCurves({ ...snapshot, protocols: fit }, model);
+    residuals.push(Math.log((p.mcap_usd as number) / impliedValue(p, snapshot.as_of, model, curves).implied));
+  }
+  const sorted = [...residuals].sort((a, b) => a - b);
+  return {
+    p10: quantileOf(sorted, 0.1),
+    p25: quantileOf(sorted, 0.25),
+    p75: quantileOf(sorted, 0.75),
+    p90: quantileOf(sorted, 0.9),
+    n: sorted.length,
+  };
+}
+
 /**
  * The model's blind test, computed from the snapshot at build time: the size curve is fitted
  * only on live-token protocols listed before a cut date, then asked to price the ones listed
@@ -775,6 +837,7 @@ export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL)
     (p) => !isPreToken(p) && p.category !== 'CEX' && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.listed_at !== null,
   );
   const cuts: ValidationCut[] = [];
+  const rangeCalibration: RangeCalibrationRow[] = [];
   const raceByEstimator = new Map<string, { cut: string; med_abs_log_error: number; spearman: number }[]>();
   const ablationByVariant = new Map<string, { cut: string; med_abs_log_error: number; spearman: number }[]>();
   for (const cut of ['2022-12-31', '2023-12-31', '2024-12-31']) {
@@ -791,7 +854,7 @@ export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL)
       list.push({ cut, med_abs_log_error: s.medErr, spearman: s.spearman });
       raceByEstimator.set(name, list);
     }
-    // The radar-5 cut line (for the main table): the curve multiple, no other terms.
+    // The radar-6 cut line (for the main table): the curve multiple, no other terms.
     const rows = test.map((p) => {
       const full = impliedValue(p, snapshot.as_of, model, curves);
       const flat = Math.max(1, Math.round(p.tvl_usd * 0.25));
@@ -811,9 +874,36 @@ export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL)
       spearman_flat: Math.round(spearman(rows.map((r) => r.flat), rows.map((r) => r.actual)) * 1000) / 1000,
       mean_signed_log_error: Math.round((signed.reduce((a, b) => a + b, 0) / Math.max(1, signed.length)) * 1000) / 1000,
     });
+    // Out-of-sample range calibration: the ranges for this cut's test set are built from
+    // the fit set's own leave-one-out residuals, then checked against the test actuals —
+    // the ranges never see the test set while they are built.
+    const fitResiduals: number[] = [];
+    for (let i = 0; i < fit.length; i++) {
+      const sub = fit.filter((_, j) => j !== i);
+      const p = fit[i]!;
+      const subCurves = sizeCurves({ ...snapshot, protocols: sub }, model);
+      fitResiduals.push(Math.log((p.mcap_usd as number) / impliedValue(p, snapshot.as_of, model, subCurves).implied));
+    }
+    const fitSorted = [...fitResiduals].sort((a, b) => a - b);
+    const fitQ10 = quantileOf(fitSorted, 0.1);
+    const fitQ25 = quantileOf(fitSorted, 0.25);
+    const fitQ75 = quantileOf(fitSorted, 0.75);
+    const fitQ90 = quantileOf(fitSorted, 0.9);
+    rangeCalibration.push({
+      cut,
+      test: test.length,
+      in_p25_p75: rows.filter((r) => {
+        const res = Math.log(r.actual / r.radar);
+        return res >= fitQ25 && res <= fitQ75;
+      }).length,
+      in_p10_p90: rows.filter((r) => {
+        const res = Math.log(r.actual / r.radar);
+        return res >= fitQ10 && res <= fitQ90;
+      }).length,
+    });
     // The terms test: the growth / tenure / breadth terms radar-2 through radar-4 carried,
     // scored against the shipped model (the multiple alone). The terms are the rejected
-    // alternative now: with the tighter radar-5 curve they hurt on every cut, so the model
+    // alternative now: with the tighter radar-6 curve they hurt on every cut, so the model
     // dropped them. Their arithmetic is kept here, as literals, only for this comparison.
     const termsOf = (p: SnapshotProtocol): number => {
       const growthPct = Math.min(120, Math.max(-60, finite(p.change_7d, 0)));
@@ -848,6 +938,7 @@ export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL)
     looTvl.push({ actual: p.mcap_usd as number, pred: p.tvl_usd });
   }
   const looScore = scorePredictions(looRows);
+  const looResidualsSorted = looRows.map((r) => Math.log(r.actual / r.pred)).sort((a, b) => a - b);
   const loo: LeaveOneOut = {
     n: live.length,
     med_abs_log_error: looScore.medErr,
@@ -878,6 +969,13 @@ export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL)
       'Fitted only on older listings, one global size slope with a shrunk per-category level cuts the blind-test error against a flat 0.25 multiple on every cut and on leave-one-out, and beats radar-4’s per-category slopes on the paired comparisons. The growth, tenure and breadth terms radar-4 carried were tested and dropped: the multiple alone beats the full model on the ranking of every cut. The board is a ranking device: read the rank, not the dollar figure.',
     horse_race: horseRace,
     loo,
+    loo_residual_quantiles: {
+      p10: quantileOf(looResidualsSorted, 0.1),
+      p25: quantileOf(looResidualsSorted, 0.25),
+      p75: quantileOf(looResidualsSorted, 0.75),
+      p90: quantileOf(looResidualsSorted, 0.9),
+    },
+    range_calibration: rangeCalibration,
     ablation: [...ablationByVariant.entries()].map(([variant, cuts]) => ({ variant, cuts })),
   };
 }
@@ -983,6 +1081,23 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0))
     .slice(0, EARLY_ROWS);
   for (const e of early) chosen.set(e.p.slug, e.p);
+  // Radar-6: the off list — rankable protocols above the watchlist floor that are not on the
+  // watchlist. They pass the snapshot's own pre-token rules; the snapshot carries no
+  // parent-protocol record, so the house's extra rule cannot be applied to them. They are
+  // ranked in their own scope, labelled, not silently merged into the early rows.
+  const offlist = snapshot.protocols
+    .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd >= snapshot.floor_usd)
+    .map((p) => ({ p, v: impliedValue(p, snapshot.as_of, model, curves) }))
+    .sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
+  for (const e of offlist) chosen.set(e.p.slug, e.p);
+  const scopeBySlug = new Map<string, 'watchlist' | 'early' | 'off-list'>();
+  for (const slug of snapshot.watchlist) scopeBySlug.set(slug, 'watchlist');
+  for (const e of early) scopeBySlug.set(e.p.slug, 'early');
+  for (const e of offlist) scopeBySlug.set(e.p.slug, 'off-list');
+  // The value ranges: the model's own leave-one-out residual quantiles, applied to each
+  // row's implied value. P25–P75 is the middle half of the model's own errors; P10–P90
+  // the middle four fifths. The ranges are the model's uncertainty, stated, not hidden.
+  const rangeQ = looResidualQuantiles(snapshot, model);
 
   const scored = [...chosen.values()].map((p) => {
     const v = impliedValue(p, snapshot.as_of, model, curves);
@@ -1007,8 +1122,13 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       gecko_id: p.gecko_id,
       symbol: p.symbol,
       token_status: 'pre-token' as const,
+      scope: scopeBySlug.get(p.slug) ?? 'early',
       age_days: v.age,
       implied_value_usd: v.implied,
+      value_range_p25_usd: Math.max(1, Math.round(v.implied * Math.exp(rangeQ.p25))),
+      value_range_p75_usd: Math.max(1, Math.round(v.implied * Math.exp(rangeQ.p75))),
+      value_range_p10_usd: Math.max(1, Math.round(v.implied * Math.exp(rangeQ.p10))),
+      value_range_p90_usd: Math.max(1, Math.round(v.implied * Math.exp(rangeQ.p90))),
       model: {
         base_multiple: v.categoryMultiple,
         category_multiple: v.categoryMultiple,
@@ -1176,7 +1296,12 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     on_watchlist: onWatchlist,
+    scope: row.scope,
     implied_value_usd: row.implied_value_usd,
+    value_range_p25_usd: row.value_range_p25_usd,
+    value_range_p75_usd: row.value_range_p75_usd,
+    value_range_p10_usd: row.value_range_p10_usd,
+    value_range_p90_usd: row.value_range_p90_usd,
     category_multiple: row.model.category_multiple,
     value_breakdown: row.value_breakdown,
     farm_steps: row.farm_steps,
@@ -1232,7 +1357,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const live = liveRows(snapshot);
   const multiples = categoryMultiples(snapshot, model);
   const curves = sizeCurves(snapshot, model);
-  const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const early = board.filter((r) => r.scope === 'early').length;
+  const offlist = board.filter((r) => r.scope === 'off-list').length;
   const comparables = [...multiples.byCategory.values()]
     .filter((c) => board.some((r) => r.category === c.category))
     .map((c) => {
@@ -1247,6 +1373,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     ranked: board.length,
     watchlist: snapshot.watchlist.length,
     early,
+    offlist,
     live_total: snapshot.protocols.filter((p) => !isPreToken(p) && p.category !== 'CEX').length,
     median_curve_multiple: Math.round(median(board.map((r) => r.model.category_multiple).sort((a, b) => a - b))! * 10000) / 10000,
     top_implied_usd: board[0]?.implied_value_usd ?? 0,
@@ -1267,8 +1394,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   }
   for (const k of Object.keys(compsByCategory)) compsByCategory[k]!.sort((a, b) => a - b);
   // Protocols above the floor that pass the snapshot-visible rules but are not on the house
-  // watchlist: the house's rule also checks DefiLlama's parent-protocol record, which the
-  // snapshot does not carry, so they are left out rather than ranked as launches.
+  // watchlist used to be left out (the house's rule also checks DefiLlama's parent-protocol
+  // record, which the snapshot does not carry). Radar-6 ranks them in their own Off-list
+  // scope instead, labelled; this list is now empty by construction.
   const watchlist = new Set(snapshot.watchlist);
   const excludedAboveFloor = snapshot.protocols
     .filter((p) => isRankable(p) && p.tvl_usd >= snapshot.floor_usd && !watchlist.has(p.slug))
@@ -1283,6 +1411,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
+    offlist_size: offlist,
     live_size: live.length,
     rows: board.map((r) => radarRow(r, snapshot.watchlist.includes(r.slug))),
     live,

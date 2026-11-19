@@ -183,6 +183,7 @@ function headerHTML(d) {
       <span class="chip"><b>${d.board_size}</b> protocols ranked</span>
       <span class="chip"><b>${d.watchlist_size}</b> on the watchlist</span>
       <span class="chip"><b>${d.early_size}</b> early finds below the floor</span>
+      <span class="chip"><b>${d.offlist_size}</b> off-list above the floor</span>
       <span class="chip"><b>${d.live_size}</b> live tokens set aside</span>
       <span class="chip">Snapshot <b>${esc(d.as_of)}</b></span>
       <span class="chip">Watchlist floor <b>${fmtShort(d.floor_usd)}</b> TVL</span>
@@ -193,7 +194,7 @@ function headerHTML(d) {
 function kpiHTML(d) {
   const k = d.kpis;
   return `<section class="kpis" aria-label="Headline numbers">
-    <div class="stat"><div class="k">Ranked</div><div class="v">${k.ranked}</div><div class="d">${k.watchlist} watchlist + ${k.early} early</div></div>
+    <div class="stat"><div class="k">Ranked</div><div class="v">${k.ranked}</div><div class="d">${k.watchlist} watchlist + ${k.early} early + ${k.offlist} off-list</div></div>
     <div class="stat"><div class="k">Live tokens in snapshot</div><div class="v">${k.live_total}</div><div class="d">of ${d.inventory.total} protocols seen</div></div>
     <div class="stat"><div class="k">Top implied value</div><div class="v">${fmtShort(k.top_implied_usd)}</div><div class="d">median curve multiple ${k.median_curve_multiple}</div></div>
     <div class="stat"><div class="k">Farm verdicts</div><div class="v">${k.farm} / ${k.thin} / ${k.skip}</div><div class="d">farm / thin / skip</div></div>
@@ -227,6 +228,16 @@ function methodHTML(d) {
       <li><b>Rank range:</b> each row's rank across ${d.refits} refits of the curves.
       <b>Farm verdict:</b> farm, thin or skip, netted to the break-even at a 5% community
       allocation of the implied value.</li>
+      <li><b>Value range:</b> every row carries the P25–P75 range the model's own
+      leave-one-out residuals imply (log residuals ${d.validation.loo_residual_quantiles.p25.toFixed(3)} to
+      ${d.validation.loo_residual_quantiles.p75.toFixed(3)}; the P10–P90 range is on the detail view). The
+      point value is the middle of a wide spread — the model is usually within a few times of
+      the actual cap, not within a few percent. Read the rank, not the dollar figure.</li>
+      <li><b>Off list:</b> protocols above the floor that are not on the house watchlist are
+      ranked in their own scope, labelled on every row. They pass the snapshot's own pre-token
+      rules, but the snapshot carries no parent-protocol record, so the house's extra rule
+      cannot be checked for them — they are shown as launches waiting to happen, with the
+      caveat stated, rather than silently merged or left out.</li>
       <li><b>Excluded:</b> protocols with a token, and wrapped, staked or bridged products of a
       token that already trades &mdash; they are not launches waiting to happen. The Coverage
       view accounts for all ${d.inventory.total} protocols in the snapshot.</li>
@@ -309,7 +320,7 @@ function validationHTML(d) {
     <table class="comp"><thead><tr><th>Estimator</th><th class="num">2022 cut (error / rank corr.)</th><th class="num">2023 cut</th><th class="num">2024 cut</th><th class="num">Leave-one-out</th></tr></thead>
     <tbody>${raceRows}</tbody></table>
     <p class="small">Every estimator is just TVL times its multiple, so the comparison isolates
-    the multiple. The radar-5 curve wins on point values on every cut and on leave-one-out,
+    the multiple. The radar-6 curve wins on point values on every cut and on leave-one-out,
     and beats radar-4's per-category slopes on leave-one-out; the ranking tracks actual market
     caps about as well as TVL alone for all of them.</p>
     <h3>Leave-one-out</h3>
@@ -317,6 +328,19 @@ function validationHTML(d) {
     the held-out one: median log error ${v.loo.med_abs_log_error}, ${v.loo.within_2x} of ${v.loo.n}
     within 2&times;, rank correlation ${v.loo.spearman_radar.toFixed(2)} (TVL alone
     ${v.loo.spearman_tvl.toFixed(2)}, flat 0.25 ${v.loo.spearman_flat.toFixed(2)}).</p>
+    <h3>Value ranges, and whether they are honest</h3>
+    <p class="small">Every row carries a P25–P75 value range built from the model's own
+    leave-one-out log residuals (${v.loo_residual_quantiles.p25.toFixed(3)} to ${v.loo_residual_quantiles.p75.toFixed(3)};
+    P10–P90 ${v.loo_residual_quantiles.p10.toFixed(3)} to ${v.loo_residual_quantiles.p90.toFixed(3)}). The ranges below
+    were built the hard way: for each cut, the range comes from the fit set's own leave-one-out
+    residuals and is checked against the test set's actual caps — the ranges never saw the test
+    set while they were built.</p>
+    <table class="comp"><thead><tr><th>Test set</th><th class="num">Tested on</th><th class="num">Inside P25–P75 (aim: half)</th><th class="num">Inside P10–P90 (aim: four fifths)</th></tr></thead>
+    <tbody>${v.range_calibration.map((c) => `<tr><td>Listed after ${esc(c.cut)}</td><td class="num">${c.test}</td><td class="num">${c.in_p25_p75} / ${c.test}</td><td class="num">${c.in_p10_p90} / ${c.test}</td></tr>`).join('')}</tbody></table>
+    <p class="small">The middle-half ranges hold about half of new launches out of sample
+    (${v.range_calibration.reduce((a, c) => a + c.in_p25_p75, 0)} of ${v.range_calibration.reduce((a, c) => a + c.test, 0)}), as aimed. The wide ranges hold
+    ${v.range_calibration.reduce((a, c) => a + c.in_p10_p90, 0)} of ${v.range_calibration.reduce((a, c) => a + c.test, 0)} — a little under the four fifths they aim for: the tails are heavier than
+    the in-sample residuals suggest, so treat the P10–P90 ends as soft.</p>
     <h3>Why the growth, tenure and breadth terms are gone</h3>
     <table class="comp"><thead><tr><th>Variant</th><th class="num">2022 cut</th><th class="num">2023 cut</th><th class="num">2024 cut</th></tr></thead>
     <tbody>${ablRows}</tbody></table>
@@ -337,13 +361,14 @@ function notOnBoardHTML(d) {
   return `<section class="method" aria-label="What is not on the board">
     <h2>What is not on the board, and why</h2>
     <p>The board's ${d.board_size} rows are the ${d.watchlist_size} watchlist protocols plus
-    ${d.early_size} early finds below the floor — every protocol the snapshot-visible rules
-    allow. The Coverage view accounts for all ${inv.total} protocols in the snapshot:
+    ${d.early_size} early finds below the floor plus ${d.offlist_size} off-list protocols above
+    the floor — every protocol the snapshot-visible rules allow. The off-list rows pass the
+    snapshot's own pre-token rules but are not on the house watchlist; the house's rule also
+    checks DefiLlama's parent-protocol record, which the snapshot does not carry, so they are
+    ranked in their own scope, labelled on every row, rather than silently merged or left out.
+    The Coverage view accounts for all ${inv.total} protocols in the snapshot:
     ${inv.ranked} ranked, ${inv.live} already live with a token, and the rest left out by
-    reason. ${d.excluded_above_floor} protocols above the $${fmtInt(d.floor_usd)} floor pass
-    the rules the snapshot itself shows but are not on the house watchlist — the house's rule
-    also checks DefiLlama's parent-protocol record, which the snapshot does not carry, so
-    they are left out rather than ranked as launches waiting to happen.</p>
+    reason.</p>
   </section>`;
 }
 
@@ -365,7 +390,7 @@ function coverageView(d) {
       live with a token, or left out for a stated reason. The rows below sum to ${inv.total}.</p>
       <table class="comp"><thead><tr><th>Disposition</th><th class="num">Count</th><th>Protocols</th></tr></thead>
       <tbody>
-        <tr><td><b>Ranked on the board</b></td><td class="num"><b>${inv.ranked}</b></td><td>${d.watchlist_size} watchlist + ${d.early_size} early finds</td></tr>
+        <tr><td><b>Ranked on the board</b></td><td class="num"><b>${inv.ranked}</b></td><td>${d.watchlist_size} watchlist + ${d.early_size} early finds + ${d.offlist_size} off-list</td></tr>
         ${rows}
       </tbody></table>
       <p class="small muted">Live-token protocols are the comparables: their market-cap / TVL
@@ -386,32 +411,52 @@ function sandboxView(d) {
   const row = d.rows.find((r) => r.slug === slug) || d.rows[0];
   const tvlFactor = Number(p.get('tvlx') ?? 1);
   const tvl = Math.max(1, Math.round(row.tvl_usd * tvlFactor));
+  const growth = Number(p.get('growth') ?? (row.change_7d ?? 0));
+  const age = Number(p.get('age') ?? (row.age_days ?? 365));
+  const chains = Math.max(1, Math.round(Number(p.get('chains') ?? row.chains.length)));
   const { multiple, slope, intercept } = recomputeCurveMultiple(d, { ...row, tvl_usd: tvl });
   const implied = Math.max(1, Math.round(tvl * multiple));
   const rank = d.rows.filter((r) => r.implied_value_usd > implied).length + 1;
+  // The dropped terms, shown so you can see what they would do: the blind test rejected
+  // them, so they do not move the board value — the sandbox shows the comparison, with the
+  // same arithmetic the ablation in the model uses.
+  const growthMult = 1 + (Math.min(120, Math.max(-60, growth)) / 100) * 0.5;
+  const maturityMult = 0.6 + (Math.min(Math.max(age, 0), 1095) / 1095) * 0.4;
+  const breadthMult = Math.min(1 + Math.min(Math.max(chains - 1, 0), 5) * 0.02, 1.1);
+  const termsMult = growthMult * maturityMult * breadthMult;
+  const withTerms = Math.max(1, Math.round(implied * termsMult));
   const options = d.rows.map((r) => opt(r.slug, row.slug, `#${r.rank} ${r.name}`)).join('');
   main.innerHTML = `<div class="wrap">${headerHTML(d)}
     ${tabsHTML(d, 'sandbox')}
     <section class="method" aria-label="Sandbox">
-      <h2>Sandbox: what if this protocol's TVL changes?</h2>
-      <p>Take a ranked protocol and change its TVL. The value is recomputed with the same
-      size curve as the board — the curve does not move, only the protocol does. TVL is the
-      only input that moves the value: growth, age and chain count are shown on every row as
-      facts, but the blind test showed they should not move the value.</p>
+      <h2>Sandbox: what if this protocol changes?</h2>
+      <p>Take a ranked protocol and change its TVL, its 7-day growth, its age or its chain count.
+      The value is recomputed with the same size curve as the board — the curve does not move,
+      only the protocol does. Only TVL moves the board value: growth, age and chain count are
+      shown on every row as facts, but the blind test showed they should not move the value. The
+      last two rows show what the value <i>would</i> be if the dropped growth, tenure and breadth
+      terms were applied — the comparison the blind test ran, so you can see why they were dropped.</p>
       <form class="controls" id="sandbox">
         <label>Protocol <select name="slug">${options}</select></label>
         <label>TVL &times; <input type="number" name="tvlx" step="0.1" min="0.1" max="10" value="${tvlFactor}"></label>
+        <label>7-day growth % <input type="number" name="growth" step="1" min="-60" max="120" value="${growth}"></label>
+        <label>Age, days <input type="number" name="age" step="30" min="0" max="3650" value="${age}"></label>
+        <label>Chains <input type="number" name="chains" step="1" min="1" max="20" value="${chains}"></label>
         <button class="btn" type="submit">Recompute</button>
       </form>
       <table class="break"><tbody>
         <tr><th>TVL used</th><td class="num">${fmtUsd(tvl)}</td></tr>
         <tr><th>Size curve (${esc(row.category ?? 'Uncategorised')})</th><td class="num">log mcap = ${intercept} + ${slope} log TVL</td></tr>
         <tr><th>Multiple at that TVL</th><td class="num">&times; ${multiple.toFixed(4)}</td></tr>
-        <tr><th>Implied value</th><td class="num">${fmtUsd(implied)}</td></tr>
+        <tr><th>Implied value (board value)</th><td class="num">${fmtUsd(implied)}</td></tr>
         <tr><th>Where that would rank</th><td class="num">#${rank} of ${d.board_size} (board value ${fmtShort(row.implied_value_usd)}, rank #${row.rank})</td></tr>
+        <tr><th>Value with the dropped terms applied</th><td class="num">${fmtUsd(withTerms)}</td></tr>
+        <tr><th>What the terms would do</th><td class="num">&times; ${termsMult.toFixed(3)} (growth &times; ${growthMult.toFixed(3)}, tenure &times; ${maturityMult.toFixed(3)}, breadth &times; ${breadthMult.toFixed(3)})</td></tr>
       </tbody></table>
       <p class="small muted">A protocol that doubles its TVL does not double its implied value:
-      the size curve pays less per TVL as it grows. The sandbox shows the curve's bite.</p>
+      the size curve pays less per TVL as it grows. The sandbox shows the curve's bite. The
+      dropped terms move the value by &times; ${termsMult.toFixed(2)} here — on the blind test they
+      pushed predictions the wrong way, which is why the board ignores them.</p>
     </section>
     <footer class="foot">Sandbox recomputes with model ${esc(d.model_version)} from the same
     ${esc(d.as_of)} snapshot. Not financial advice.</footer>
@@ -421,7 +466,13 @@ function sandboxView(d) {
     e.preventDefault();
     const f = new FormData(e.target);
     const next = new URLSearchParams({ view: 'sandbox' });
-    for (const [k, v] of f.entries()) if (v !== '') next.set(k, v);
+    const newSlug = f.get('slug');
+    next.set('slug', newSlug);
+    // A new protocol starts from its own facts; the what-if inputs only carry over when the
+    // protocol stays the same.
+    if (newSlug === slug) {
+      for (const [k, v] of f.entries()) if (k !== 'slug' && v !== '') next.set(k, v);
+    }
     go('?' + next.toString());
   });
 }
@@ -450,6 +501,7 @@ function compareView(d) {
       </form>
       <table class="comp"><thead><tr><th></th>${head}</tr></thead><tbody>
         ${line('Implied value', (r) => fmtShort(r.implied_value_usd))}
+        ${line('Value range (P25–P75)', (r) => fmtShort(r.value_range_p25_usd) + '–' + fmtShort(r.value_range_p75_usd))}
         ${line('TVL', (r) => fmtShort(r.tvl_usd))}
         ${line('Size-curve multiple', (r) => '&times; ' + r.category_multiple.toFixed(4))}
         ${line('Curve', (r) => `log mcap = ${r.curve_intercept} + ${r.curve_slope} log TVL`)}
@@ -490,9 +542,9 @@ function download(name, text, type) {
 }
 
 function exportCSV(d) {
-  const head = 'rank,slug,name,category,chains,tvl_usd,change_7d,age_days,implied_value_usd,curve_multiple,farm_verdict,farm_cost_usd,farm_breakeven_usd';
+  const head = 'rank,slug,name,category,scope,chains,tvl_usd,change_7d,age_days,implied_value_usd,value_range_p25_usd,value_range_p75_usd,curve_multiple,farm_verdict,farm_cost_usd,farm_breakeven_usd';
   const lines = d.rows.map((r) =>
-    [r.rank, r.slug, '"' + r.name.replaceAll('"', '""') + '"', '"' + (r.category ?? '').replaceAll('"', '""') + '"', '"' + r.chains.join(';') + '"', r.tvl_usd, r.change_7d ?? '', r.age_days ?? '', r.implied_value_usd, r.category_multiple, r.farm_verdict, r.farm_cost_usd, r.farm_breakeven_usd].join(','),
+    [r.rank, r.slug, '"' + r.name.replaceAll('"', '""') + '"', '"' + (r.category ?? '').replaceAll('"', '""') + '"', r.scope, '"' + r.chains.join(';') + '"', r.tvl_usd, r.change_7d ?? '', r.age_days ?? '', r.implied_value_usd, r.value_range_p25_usd, r.value_range_p75_usd, r.category_multiple, r.farm_verdict, r.farm_cost_usd, r.farm_breakeven_usd].join(','),
   );
   download('token-radar-board.csv', head + '\n' + lines.join('\n') + '\n', 'text/csv');
 }
@@ -532,8 +584,9 @@ function boardView(d) {
   const watchlist = new Set(d.rows.filter((r) => r.on_watchlist).map((r) => r.slug));
 
   let rows = d.rows.filter((r) => {
-    if (scope === 'watchlist' && !watchlist.has(r.slug)) return false;
-    if (scope === 'early' && watchlist.has(r.slug)) return false;
+    if (scope === 'watchlist' && r.scope !== 'watchlist') return false;
+    if (scope === 'early' && r.scope !== 'early') return false;
+    if (scope === 'offlist' && r.scope !== 'off-list') return false;
     if (cat && r.category !== cat) return false;
     if (chain && !r.chains.includes(chain)) return false;
     if (q && !(r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q))) return false;
@@ -553,20 +606,21 @@ function boardView(d) {
     .map(
       (r) => `<tr data-slug="${esc(r.slug)}" class="${watchlist.has(r.slug) ? 'watch' : ''}">
         <td class="rank">#${r.rank}<span class="range">${r.rank_range[0] === r.rank_range[1] ? 'steady' : '#' + r.rank_range[0] + '–#' + r.rank_range[1]}</span></td>
-        <td class="proto"><b>${esc(r.name)}</b><span>${esc(r.slug)}</span>${watchlist.has(r.slug) ? '<span class="tag">WATCHLIST</span>' : ''}</td>
+        <td class="proto"><b>${esc(r.name)}</b><span>${esc(r.slug)}</span>${r.scope === 'watchlist' ? '<span class="tag">WATCHLIST</span>' : ''}${r.scope === 'off-list' ? '<span class="tag">OFF-LIST</span>' : ''}</td>
         <td>${esc(r.category ?? '—')}</td>
         <td>${esc(r.chains.slice(0, 3).join(', '))}${r.chains.length > 3 ? ` +${r.chains.length - 3}` : ''}</td>
         <td class="num">${fmtShort(r.tvl_usd)}</td>
         <td class="num">${fmtPct(r.change_7d)}</td>
         <td class="num">${ageText(r.age_days)}</td>
         <td class="num implied">${fmtShort(r.implied_value_usd)}</td>
+        <td class="num">${fmtShort(r.value_range_p25_usd)}–${fmtShort(r.value_range_p75_usd)}</td>
         <td><span class="verdict ${r.farm_verdict}">${verdictLabel(r.farm_verdict)}</span></td>
         <td><span class="plan-link">Farm plan &rsaquo;</span></td>
       </tr>`,
     )
     .join('');
 
-  const active = [cat && `category ${cat}`, chain && `chain ${chain}`, q && `“${q}”`, scope !== 'all' && (scope === 'watchlist' ? 'watchlist only' : 'early finds only')]
+  const active = [cat && `category ${cat}`, chain && `chain ${chain}`, q && `“${q}”`, scope !== 'all' && { watchlist: 'watchlist only', early: 'early finds only', offlist: 'off-list only' }[scope]]
     .filter(Boolean)
     .join(' · ');
 
@@ -576,13 +630,13 @@ function boardView(d) {
       <label>Search <input type="search" name="q" value="${esc(p.get('q') || '')}" placeholder="Name or slug"></label>
       <label>Category <select name="category"><option value="">All categories</option>${categories.map((c) => opt(c, cat, c)).join('')}</select></label>
       <label>Chain <select name="chain"><option value="">All chains</option>${chains.map((c) => opt(c, chain, c)).join('')}</select></label>
-      <label>Scope <select name="scope">${opt('all', scope, 'All rows')}${opt('watchlist', scope, 'Watchlist only')}${opt('early', scope, 'Early finds only')}</select></label>
+      <label>Scope <select name="scope">${opt('all', scope, 'All rows')}${opt('watchlist', scope, 'Watchlist only')}${opt('early', scope, 'Early finds only')}${opt('offlist', scope, 'Off-list only')}</select></label>
       <label>Sort by <select name="sort">${opt('value', sort, 'Implied value')}${opt('tvl', sort, 'TVL')}${opt('growth', sort, '7-day growth')}${opt('age', sort, 'Age')}${opt('name', sort, 'Name')}</select></label>
       <button class="btn" type="submit">Apply</button>
     </form>
     <p class="result-line">Showing <b>${sorted.length}</b> of ${d.board_size} ranked protocols${active ? ` &mdash; filtered by ${esc(active)}` : ''}. Click a row for its detail view and farm plan. The small range under each rank is where it usually sits over ${d.refits} refits of the size curves.</p>
-    <table class="board"><thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th><th class="num">Implied value</th><th>Farm</th><th></th></tr></thead>
-    <tbody>${body || '<tr><td colspan="10">No protocol matches this filter.</td></tr>'}</tbody></table>
+    <table class="board"><thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th><th class="num">Implied value</th><th class="num">Value range (P25–P75)</th><th>Farm</th><th></th></tr></thead>
+    <tbody>${body || '<tr><td colspan="11">No protocol matches this filter.</td></tr>'}</tbody></table>
     <p class="export-row"><button class="btn ghost" id="export-csv">Download board as CSV</button>
     <button class="btn ghost" id="export-json">Download board as JSON</button></p>
     ${topPicksHTML(d)}
@@ -640,7 +694,7 @@ function detailView(d) {
 
   main.innerHTML = `<div class="wrap">
     <div class="detail-head">
-      <span class="rank-badge">Rank #${row.rank} of ${d.board_size}${row.on_watchlist ? ' &middot; Watchlist' : ' &middot; Early find'} &middot; usually #${row.rank_range[0]}&ndash;#${row.rank_range[1]} over ${d.refits} refits</span>
+      <span class="rank-badge">Rank #${row.rank} of ${d.board_size}${row.scope === 'watchlist' ? ' &middot; Watchlist' : row.scope === 'off-list' ? ' &middot; Off-list' : ' &middot; Early find'} &middot; usually #${row.rank_range[0]}&ndash;#${row.rank_range[1]} over ${d.refits} refits</span>
       <span class="verdict ${row.farm_verdict} big">${verdictLabel(row.farm_verdict)}</span>
       <h1>${esc(row.name)}</h1>
       <p class="muted">${esc(row.slug)} &middot; ${esc(row.category ?? 'Uncategorised')} &middot; ${esc(row.chains.join(', '))}</p>
@@ -658,10 +712,14 @@ function detailView(d) {
         <tr><th>Size-curve multiple (${esc(row.category ?? 'Uncategorised')})</th><td class="num">&times; ${row.category_multiple.toFixed(4)}</td></tr>
         <tr><th>Size curve</th><td class="num">log mcap = ${row.curve_intercept} + ${row.curve_slope} log TVL</td></tr>
         <tr><th>Implied value</th><td class="num">${fmtUsd(row.implied_value_usd)}</td></tr>
+        <tr><th>Value range (P25–P75)</th><td class="num">${fmtUsd(row.value_range_p25_usd)} – ${fmtUsd(row.value_range_p75_usd)}</td></tr>
+        <tr><th>Value range (P10–P90)</th><td class="num">${fmtUsd(row.value_range_p10_usd)} – ${fmtUsd(row.value_range_p90_usd)}</td></tr>
       </tbody></table>
       <p class="small muted">The multiple comes from the category's size curve at this protocol's
       own TVL: the market pays less per TVL as protocols get bigger, so a giant and a minnow in
-      the same category get different multiples. Growth (${row.change_7d === null ? 'n/a' : (row.change_7d > 0 ? '+' : '') + row.change_7d.toFixed(1) + '%'} in 7 days), age
+      the same category get different multiples. The ranges are the middle half and the middle
+      four fifths of the model's own leave-one-out errors — the value is a ranking device, not
+      a price target. Growth (${row.change_7d === null ? 'n/a' : (row.change_7d > 0 ? '+' : '') + row.change_7d.toFixed(1) + '%'} in 7 days), age
       (${row.age_days === null ? 'unknown' : row.age_days + ' days, no token'}) and breadth
       (${row.chains.length} chain${row.chains.length === 1 ? '' : 's'}) are shown as facts, but
       they do not move the value: the blind test showed they should not. The token does not
