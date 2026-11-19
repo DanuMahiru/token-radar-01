@@ -1,25 +1,33 @@
-// Token Radar dashboard, radar-4.
+// Token Radar dashboard, radar-5.
 //
 // A static page: it reads window.RADAR (written by main.ts from the same board.json the gate
 // checks), renders the ranked board, a detail view for every protocol, a filtered view and the
 // live-token set. No fetch, no network, no framework. Every figure on the page comes from the
 // snapshot through lib/model.ts; the page never invents a number.
 //
-// Model (radar-4), stated on the page and computed in lib/model.ts — and recomputed here, in
+// Model (radar-5), stated on the page and computed in lib/model.ts — and recomputed here, in
 // this file, from the snapshot's own live-token set, so the page checks its own board:
-//   implied = TVL x size-curve multiple x growth x tenure x breadth
-//   size-curve multiple = exp(a + b log TVL) / TVL, clamped to [0.02, 1.50], where
-//   log(mcap) = a + b log(TVL) is fitted by least squares on the snapshot's own live-token
-//   protocols in the same category. A category's slope is shrunk toward the global slope
-//   (weight n / (n + 40)) and the line re-centred on the category's centroid; categories with
-//   fewer than 5 live comps use the global curve. Growth clamps the 7-day TVL change to
-//   [-60, +120]% at half weight; tenure rises from 0.60 to 1.00 over three years with no
-//   token; breadth adds 2% per extra chain, at most +10%. No name is ever special-cased.
+//   implied = TVL x size-curve multiple
+//   size-curve multiple = (exp(a + b log TVL) / TVL) ^ 0.9, clamped to [0.02, 1.50], where
+//   log(mcap) = a + b log(TVL) is ONE line for the whole market, fitted by least squares on
+//   the snapshot's own live-token protocols; each category gets its own level (intercept),
+//   shrunk toward the global line's value at the category's centroid (weight n / (n + 10)).
+//   Categories with fewer than 5 live comps use the global line. The ^0.9 shrinks the
+//   multiple toward 1.00 — a geometric blend with TVL alone.
+//
+//   Growth, tenure and breadth are NOT in the value. Radar-2 through radar-4 multiplied by
+//   them (7-day growth at half weight, tenure 0.60 to 1.00 over three years, +2% per extra
+//   chain), but with the tighter radar-5 curve the blind test showed they hurt: the multiple
+//   alone beats the full model on the ranking of every cut. Age still sets the farm plan's
+//   hold (younger protocols hold longer), and growth and chain count are still shown as facts
+//   on every row — they just do not move the value, because the evidence says they should not.
 //
 //   The market pays less per TVL as a protocol gets bigger (the global slope is about 0.47),
-//   which is why a flat multiple overprices the giants and a median ratio misses the size
-//   effect. The curve was tested blind: fitted only on tokens listed before a cut date, then
-//   priced on the ones listed after it, against five other multiple estimators on three cuts
+//   which is why a flat multiple overprices the giants. Radar-4 fitted a slope per category;
+//   the blind test showed the per-category slopes are mostly noise — one global slope wins
+//   the leave-one-out error by a fifth — so the categories differ in level, not steepness.
+//   The curve was tested blind: fitted only on tokens listed before a cut date, then
+//   priced on the ones listed after it, against six other multiple estimators on three cuts
 //   and leave-one-out. The ranking tracks actual market caps about as well as TVL alone and
 //   the point values are wide, so the board is a ranking device — read the rank, not the
 //   dollar figure. Each row also carries its rank range over 200 refits of the curves and a
@@ -97,7 +105,7 @@ function refitCurve(stats) {
   return { slope, intercept: my - slope * mx, mx, my };
 }
 
-/** The curve one category gets, refitted here: its own shrunk slope, or the global curve. */
+/** The curve one category gets, refitted here: one shared global slope, its own level shrunk toward the global line at its centroid — or the global curve. */
 function recomputeCurve(d, category) {
   const globalStats = d.global_fit_stats;
   const global = refitCurve(globalStats);
@@ -106,30 +114,31 @@ function recomputeCurve(d, category) {
   const stats = (d.curve_fit_stats || []).find((s) => s.category === category);
   if (!stats || stats.n < d.model.loglog_min_comps) return { slope: gSlope, intercept: gIntercept, comps: stats ? stats.n : 0, global: true };
   const fit = refitCurve(stats);
-  const prior = d.model.loglog_slope_prior;
-  const slope = round4((stats.n / (stats.n + prior)) * fit.slope + (prior / (stats.n + prior)) * global.slope);
-  const intercept = round4(fit.my - slope * fit.mx);
-  return { slope, intercept, comps: stats.n, global: false };
+  const prior = d.model.loglog_intercept_prior;
+  const w = stats.n / (stats.n + prior);
+  const level = w * fit.my + (1 - w) * (global.intercept + global.slope * fit.mx);
+  const intercept = round4(level - gSlope * fit.mx);
+  return { slope: gSlope, intercept, comps: stats.n, global: false };
+}
+
+/** The curve multiple, clamped then shrunk toward 1.00 at the model's blend power — the same arithmetic lib/model.ts uses. */
+function blendMultiple(d, raw) {
+  const clamped = Math.min(d.model.multiple_cap, Math.max(d.model.multiple_floor, raw));
+  return round4(Math.pow(round4(clamped), d.model.multiple_blend_power));
 }
 
 /** The multiple one row gets, recomputed from the refitted curve at its own TVL. */
 function recomputeCurveMultiple(d, row) {
   const curve = recomputeCurve(d, row.category);
   const raw = Math.exp(curve.intercept + curve.slope * Math.log(row.tvl_usd)) / row.tvl_usd;
-  const multiple = Math.min(d.model.multiple_cap, Math.max(d.model.multiple_floor, raw));
-  return { multiple: round4(multiple), comps: curve.comps, slope: curve.slope, intercept: curve.intercept };
+  const multiple = blendMultiple(d, raw);
+  return { multiple, comps: curve.comps, slope: curve.slope, intercept: curve.intercept };
 }
 
 /** One row's implied value, recomputed in this page from the snapshot's own figures. */
 function recomputeImpliedValue(d, row) {
-  const m = d.model;
-  const growthPct = Math.min(m.growth_cap, Math.max(m.growth_floor, row.change_7d === null ? 0 : row.change_7d));
-  const growthMult = 1 + (growthPct / 100) * m.growth_weight;
-  const age = row.age_days === null ? m.unknown_age_days : row.age_days;
-  const maturityMult = m.maturity_floor + (Math.min(Math.max(age, 0), m.maturity_days) / m.maturity_days) * m.maturity_range;
-  const breadthMult = Math.min(1 + Math.min(Math.max(row.chains.length - 1, 0), 5) * m.breadth_per_chain, 1 + m.breadth_cap);
   const { multiple } = recomputeCurveMultiple(d, row);
-  return Math.max(1, Math.round(row.tvl_usd * multiple * growthMult * maturityMult * breadthMult));
+  return Math.max(1, Math.round(row.tvl_usd * multiple));
 }
 
 /** Check the whole board against the recompute: how many rows match, and the worst gap. */
@@ -168,8 +177,8 @@ function headerHTML(d) {
     <div class="kicker">Token Radar &middot; model ${esc(d.model_version)}</div>
     <h1>Pre-token protocols, ranked by what a launch would be worth</h1>
     <p class="sub">Every protocol DefiLlama tracks that records no token yet, ranked by an implied
-    value computed from the snapshot's own figures: TVL, seven-day growth, how long it has run
-    with no token, and how many chains it reaches. Each row carries the steps to farm it.</p>
+    value computed from the snapshot's own figures: its TVL against the market's size curve.
+    Each row carries the steps to farm it.</p>
     <div class="chips">
       <span class="chip"><b>${d.board_size}</b> protocols ranked</span>
       <span class="chip"><b>${d.watchlist_size}</b> on the watchlist</span>
@@ -195,21 +204,26 @@ function kpiHTML(d) {
 function methodHTML(d) {
   return `<section class="method" aria-label="How the value is computed">
     <h2>How the implied value is computed</h2>
-    <div class="formula">implied value = TVL &times; size-curve multiple &times; growth &times; tenure &times; breadth</div>
+    <div class="formula">implied value = TVL &times; size-curve multiple</div>
     <ul>
       <li><b>Size-curve multiple:</b> the market pays less per TVL as a protocol gets bigger, so
       the multiple is not a flat ratio but a curve: log(mcap) = a + b &times; log(TVL), fitted by
-      least squares on the snapshot's own live-token protocols in the same category. A
-      category's slope is shrunk toward the global slope (weight n / (n + ${d.model.loglog_slope_prior}))
-      and the line re-centred on the category's centroid; categories with fewer than
-      ${d.model.loglog_min_comps} live comps use the global curve (slope ${d.global_curve.slope}).
-      The multiple is then exp(a + b log TVL) / TVL at the protocol's own TVL, clamped to
-      ${d.model.multiple_floor}&ndash;${d.model.multiple_cap}. No protocol name is ever special-cased.
-      This page refits every curve from the sufficient statistics it carries and recomputes
-      every multiple from its own refit.</li>
-      <li><b>Growth:</b> the 7-day TVL change, clamped to &minus;60%..+120%, at half weight.
-      <b>Tenure:</b> 0.60 for a protocol tracked under a year with no token, rising to 1.00 after
-      three years. <b>Breadth:</b> +2% per extra chain, at most +10%.</li>
+      least squares on the snapshot's own live-token protocols. There is ONE slope for the
+      whole market (b = ${d.global_curve.slope}); each category gets its own level (intercept),
+      shrunk toward the global line's value at the category's centroid (weight n / (n +
+      ${d.model.loglog_intercept_prior})); categories with fewer than
+      ${d.model.loglog_min_comps} live comps use the global line. The multiple is then
+      exp(a + b log TVL) / TVL at the protocol's own TVL, clamped to
+      ${d.model.multiple_floor}&ndash;${d.model.multiple_cap}, then shrunk toward 1.00 at power
+      ${d.model.multiple_blend_power} (a geometric blend with TVL alone). No protocol name is ever
+      special-cased. This page refits every curve from the sufficient statistics it carries and
+      recomputes every multiple from its own refit.</li>
+      <li><b>What is not in the value:</b> growth, tenure and breadth. Earlier versions multiplied
+      by them (7-day growth at half weight, tenure 0.60 to 1.00 over three years, +2% per extra
+      chain), but the blind test showed they hurt once the curve got tighter: the multiple alone
+      beats the full model on the ranking of every cut. Age still sets the farm plan's hold
+      (younger protocols hold longer), and growth and chain count are still shown as facts on
+      every row — they just do not move the value, because the evidence says they should not.</li>
       <li><b>Rank range:</b> each row's rank across ${d.refits} refits of the curves.
       <b>Farm verdict:</b> farm, thin or skip, netted to the break-even at a 5% community
       allocation of the implied value.</li>
@@ -225,23 +239,21 @@ function methodHTML(d) {
 function comparablesHTML(d) {
   const rows = d.comparables
     .map((c) => {
-      const at100m = Math.min(
-        d.model.multiple_cap,
-        Math.max(d.model.multiple_floor, Math.exp(c.curve_intercept + c.curve_slope * Math.log(100_000_000)) / 100_000_000),
-      );
+      const at100m = blendMultiple(d, Math.exp(c.curve_intercept + c.curve_slope * Math.log(100_000_000)) / 100_000_000);
       return `<tr><td>${esc(c.category)}</td><td class="num">${c.comps}</td><td class="num">${c.median_ratio === null ? 'n/a' : c.median_ratio.toFixed(3)}</td><td class="num">${c.curve_slope.toFixed(4)}</td><td class="num">log mcap = ${c.curve_intercept} + ${c.curve_slope} log TVL</td><td class="num">${at100m.toFixed(3)}</td></tr>`;
     })
     .join('');
   return `<section class="method" aria-label="Category comparables">
     <h2>Category comparables (from the snapshot's live-token protocols)</h2>
-    <table class="comp"><thead><tr><th>Category</th><th class="num">Live comps</th><th class="num">Median mcap / TVL</th><th class="num">Curve slope</th><th>Size curve</th><th class="num">Multiple at $100M TVL</th></tr></thead>
+    <table class="comp"><thead><tr><th>Category</th><th class="num">Live comps</th><th class="num">Median mcap / TVL</th><th class="num">Slope (shared)</th><th>Size curve</th><th class="num">Multiple at $100M TVL</th></tr></thead>
     <tbody>${rows}</tbody></table>
-    <p class="small muted">The slope is the size curve's: how fast market cap grows with TVL in
-    that category. A slope under 1 means the market pays less per TVL as protocols get bigger.
-    The last column is what the curve pays at a $100M TVL — each row's own multiple comes from
-    its curve at its own TVL, so a giant and a minnow in the same category get different
-    multiples. Categories with fewer than ${d.model.loglog_min_comps} live comps use the global
-    curve (slope ${d.global_curve.slope}).</p>
+    <p class="small muted">The slope is one number for the whole market: how fast market cap grows
+    with TVL. A slope under 1 means the market pays less per TVL as protocols get bigger.
+    Categories differ in level (the intercept in the equation), not in steepness. The last
+    column is what the curve pays at a $100M TVL, after the ^${d.model.multiple_blend_power}
+    blend toward TVL — each row's own multiple comes from its curve at its own TVL, so a giant
+    and a minnow in the same category get different multiples. Categories with fewer than
+    ${d.model.loglog_min_comps} live comps use the global curve (slope ${d.global_curve.slope}).</p>
   </section>`;
 }
 
@@ -260,8 +272,7 @@ function topPicksHTML(d) {
     <ol class="picks">${items}</ol>
     <p class="small muted">The five highest-ranked rows. The top three hold their rank across the
     refits and pay off even if more than 100,000 farmers share the airdrop; the next two are
-    close behind on both counts — Bittensor dTAO's rank swings widely because its category's
-    size curve is steep.</p>
+    close behind on both counts.</p>
   </section>`;
 }
 
@@ -294,25 +305,26 @@ function validationHTML(d) {
     <table class="comp"><thead><tr><th>Test set</th><th class="num">Fitted on</th><th class="num">Tested on</th><th class="num">Median log error</th><th class="num">Within 2&times;</th><th class="num">Rank corr. (model)</th><th class="num">Rank corr. (TVL alone)</th></tr></thead>
     <tbody>${rows}</tbody></table>
     <p class="small">${esc(v.reading)}</p>
-    <h3>Horse race: six ways to turn TVL into a multiple, same test sets</h3>
+    <h3>Horse race: seven ways to turn TVL into a multiple, same test sets</h3>
     <table class="comp"><thead><tr><th>Estimator</th><th class="num">2022 cut (error / rank corr.)</th><th class="num">2023 cut</th><th class="num">2024 cut</th><th class="num">Leave-one-out</th></tr></thead>
     <tbody>${raceRows}</tbody></table>
-    <p class="small">Every estimator gets the same growth, tenure and breadth terms, so the
-    comparison isolates the multiple. The size curve wins on point values on every cut and on
-    leave-one-out; the ranking tracks actual market caps about as well as TVL alone for all
-    of them.</p>
+    <p class="small">Every estimator is just TVL times its multiple, so the comparison isolates
+    the multiple. The radar-5 curve wins on point values on every cut and on leave-one-out,
+    and beats radar-4's per-category slopes on leave-one-out; the ranking tracks actual market
+    caps about as well as TVL alone for all of them.</p>
     <h3>Leave-one-out</h3>
     <p class="small">Fitted on all ${v.loo.n} dated live-token protocols but one, asked to price
     the held-out one: median log error ${v.loo.med_abs_log_error}, ${v.loo.within_2x} of ${v.loo.n}
     within 2&times;, rank correlation ${v.loo.spearman_radar.toFixed(2)} (TVL alone
     ${v.loo.spearman_tvl.toFixed(2)}, flat 0.25 ${v.loo.spearman_flat.toFixed(2)}).</p>
-    <h3>Ablation: what the growth, tenure and breadth terms add</h3>
+    <h3>Why the growth, tenure and breadth terms are gone</h3>
     <table class="comp"><thead><tr><th>Variant</th><th class="num">2022 cut</th><th class="num">2023 cut</th><th class="num">2024 cut</th></tr></thead>
     <tbody>${ablRows}</tbody></table>
-    <p class="small">The three terms are near-neutral on the blind test — within noise of the
-    multiple alone on every cut. They stay in the model because they are economically motivated
-    (a growing, older, wider protocol is worth more at the same TVL), not because they win the
-    horse race.</p>
+    <p class="small">The multiple alone beats the model with all three terms on the ranking of
+    every cut and ties it on error; dropping tenure alone wins the paired comparisons on all
+    four evaluations. The terms discounted newer listings, and newer listings are exactly the
+    ones that trade richer — so they pushed predictions the wrong way. They are kept here only
+    as the rejected alternative.</p>
     <p class="small muted">This page also refits every size curve from the sufficient statistics
     it carries and recomputes every implied value from its own refit: ${check.matched} of
     ${check.checked} rows match the board exactly, worst gap ${check.worstPct}%; ${cc.matched} of
@@ -372,40 +384,29 @@ function sandboxView(d) {
   const p = params();
   const slug = p.get('slug') || d.rows[0].slug;
   const row = d.rows.find((r) => r.slug === slug) || d.rows[0];
-  const growth = Number(p.get('growth') ?? row.change_7d ?? 0);
   const tvlFactor = Number(p.get('tvlx') ?? 1);
-  const age = Number(p.get('age') ?? row.age_days ?? d.model.unknown_age_days);
-  const chains = Number(p.get('chains') ?? row.chains.length);
-  const m = d.model;
-  const growthPct = Math.min(m.growth_cap, Math.max(m.growth_floor, growth));
-  const growthMult = 1 + (growthPct / 100) * m.growth_weight;
-  const maturityMult = m.maturity_floor + (Math.min(Math.max(age, 0), m.maturity_days) / m.maturity_days) * m.maturity_range;
-  const breadthMult = Math.min(1 + Math.min(Math.max(chains - 1, 0), 5) * m.breadth_per_chain, 1 + m.breadth_cap);
   const tvl = Math.max(1, Math.round(row.tvl_usd * tvlFactor));
   const { multiple, slope, intercept } = recomputeCurveMultiple(d, { ...row, tvl_usd: tvl });
-  const implied = Math.max(1, Math.round(tvl * multiple * growthMult * maturityMult * breadthMult));
+  const implied = Math.max(1, Math.round(tvl * multiple));
   const rank = d.rows.filter((r) => r.implied_value_usd > implied).length + 1;
   const options = d.rows.map((r) => opt(r.slug, row.slug, `#${r.rank} ${r.name}`)).join('');
   main.innerHTML = `<div class="wrap">${headerHTML(d)}
     ${tabsHTML(d, 'sandbox')}
     <section class="method" aria-label="Sandbox">
-      <h2>Sandbox: what if this protocol changes?</h2>
-      <p>Take a ranked protocol and change its inputs. The value is recomputed with the same
-      size curve and the same growth, tenure and breadth terms as the board — the curve does
-      not move, only the protocol does.</p>
+      <h2>Sandbox: what if this protocol's TVL changes?</h2>
+      <p>Take a ranked protocol and change its TVL. The value is recomputed with the same
+      size curve as the board — the curve does not move, only the protocol does. TVL is the
+      only input that moves the value: growth, age and chain count are shown on every row as
+      facts, but the blind test showed they should not move the value.</p>
       <form class="controls" id="sandbox">
         <label>Protocol <select name="slug">${options}</select></label>
         <label>TVL &times; <input type="number" name="tvlx" step="0.1" min="0.1" max="10" value="${tvlFactor}"></label>
-        <label>7-day growth % <input type="number" name="growth" step="1" min="-60" max="120" value="${growth}"></label>
-        <label>Age, days <input type="number" name="age" step="30" min="0" max="3650" value="${age}"></label>
-        <label>Chains <input type="number" name="chains" step="1" min="1" max="12" value="${chains}"></label>
         <button class="btn" type="submit">Recompute</button>
       </form>
       <table class="break"><tbody>
         <tr><th>TVL used</th><td class="num">${fmtUsd(tvl)}</td></tr>
         <tr><th>Size curve (${esc(row.category ?? 'Uncategorised')})</th><td class="num">log mcap = ${intercept} + ${slope} log TVL</td></tr>
         <tr><th>Multiple at that TVL</th><td class="num">&times; ${multiple.toFixed(4)}</td></tr>
-        <tr><th>Growth &times; tenure &times; breadth</th><td class="num">&times; ${growthMult.toFixed(4)} &times; ${maturityMult.toFixed(4)} &times; ${breadthMult.toFixed(4)}</td></tr>
         <tr><th>Implied value</th><td class="num">${fmtUsd(implied)}</td></tr>
         <tr><th>Where that would rank</th><td class="num">#${rank} of ${d.board_size} (board value ${fmtShort(row.implied_value_usd)}, rank #${row.rank})</td></tr>
       </tbody></table>
@@ -589,8 +590,7 @@ function boardView(d) {
     ${comparablesHTML(d)}
     ${notOnBoardHTML(d)}
     <footer class="foot">Source: ${esc(d.source)}. Snapshot frozen 2026-11-14; the board reads only
-    that snapshot. Model ${esc(d.model_version)}: implied = TVL &times; size-curve multiple &times; growth
-    &times; tenure &times; breadth.</footer>
+    that snapshot. Model ${esc(d.model_version)}: implied = TVL &times; size-curve multiple.</footer>
   </div>`;
 
   wireTabs(d);
@@ -657,17 +657,17 @@ function detailView(d) {
         <tr><th>TVL</th><td class="num">${fmtUsd(row.tvl_usd)}</td></tr>
         <tr><th>Size-curve multiple (${esc(row.category ?? 'Uncategorised')})</th><td class="num">&times; ${row.category_multiple.toFixed(4)}</td></tr>
         <tr><th>Size curve</th><td class="num">log mcap = ${row.curve_intercept} + ${row.curve_slope} log TVL</td></tr>
-        <tr><th>Growth multiplier (7d ${row.change_7d === null ? 'n/a' : (row.change_7d > 0 ? '+' : '') + row.change_7d.toFixed(1) + '%'})</th><td class="num">&times; ${row.growth_multiplier.toFixed(4)}</td></tr>
-        <tr><th>Tenure multiplier (${row.age_days === null ? 'age unknown' : row.age_days + ' days, no token'})</th><td class="num">&times; ${row.maturity_multiplier.toFixed(4)}</td></tr>
-        <tr><th>Breadth multiplier (${row.chains.length} chain${row.chains.length === 1 ? '' : 's'})</th><td class="num">&times; ${row.breadth_multiplier.toFixed(4)}</td></tr>
         <tr><th>Implied value</th><td class="num">${fmtUsd(row.implied_value_usd)}</td></tr>
       </tbody></table>
       <p class="small muted">The multiple comes from the category's size curve at this protocol's
       own TVL: the market pays less per TVL as protocols get bigger, so a giant and a minnow in
-      the same category get different multiples. The token does not exist yet: this is the value
-      a launch at the category's going rate would imply, from the snapshot alone. This page
-      refits the curve from the sufficient statistics it carries and recomputes the value:
-      ${fmtUsd(again)}
+      the same category get different multiples. Growth (${row.change_7d === null ? 'n/a' : (row.change_7d > 0 ? '+' : '') + row.change_7d.toFixed(1) + '%'} in 7 days), age
+      (${row.age_days === null ? 'unknown' : row.age_days + ' days, no token'}) and breadth
+      (${row.chains.length} chain${row.chains.length === 1 ? '' : 's'}) are shown as facts, but
+      they do not move the value: the blind test showed they should not. The token does not
+      exist yet: this is the value a launch at the category's going rate would imply, from the
+      snapshot alone. This page refits the curve from the sufficient statistics it carries and
+      recomputes the value: ${fmtUsd(again)}
       ${again === row.implied_value_usd ? '&mdash; it matches the board.' : `&mdash; the board says ${fmtUsd(row.implied_value_usd)}.`}</p>
     </section>
     <section class="card" aria-label="Farm economics">
