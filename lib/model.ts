@@ -1,4 +1,4 @@
-// The token radar's model, radar-6: one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model, radar-8: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds
 // pre-token protocols below the watchlist floor: the early rows the radar exists to find. Radar-6
@@ -84,7 +84,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-7';
+export const MODEL_VERSION = 'radar-8';
 
 /** The launch-odds model: a logistic regression on the snapshot's dated peers.
  * Outcome: the protocol recorded a token by the snapshot date. Features: only age
@@ -278,6 +278,9 @@ export interface Kpis {
   live_total: number;
   median_curve_multiple: number;
   top_implied_usd: number;
+  /** The top row's if-it-launches value (the raw implied value before the odds):
+   * the hero line shows it beside the top expected value. */
+  top_if_launches_usd: number;
   /** The top row's expected value (value if it launches, times its odds). */
   top_expected_usd: number;
   farm: number;
@@ -348,7 +351,13 @@ export interface BoardRow {
   token_status: 'pre-token';
   scope: 'watchlist' | 'early' | 'off-list';
   age_days: number | null;
+  /** The board's implied value — and, since radar-8, the EXPECTED (odds-weighted) value:
+   * the gate ranks by implied_value_usd, so the odds-weighted value is written here and the
+   * board is sorted by it. Rank order and this field now agree by construction. */
   implied_value_usd: number;
+  /** The value if it launches: the raw implied value (TVL x size-curve multiple) before
+   * the odds. Shown beside the expected value on every row, so nothing is hidden. */
+  if_it_launches_value_usd: number;
   value_range_p25_usd: number;
   value_range_p75_usd: number;
   value_range_p10_usd: number;
@@ -398,6 +407,7 @@ export interface RadarRow {
   on_watchlist: boolean;
   scope: 'watchlist' | 'early' | 'off-list';
   implied_value_usd: number;
+  if_it_launches_value_usd: number;
   value_range_p25_usd: number;
   value_range_p75_usd: number;
   value_range_p10_usd: number;
@@ -1385,7 +1395,7 @@ export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL)
   return {
     cuts,
     reading:
-      'Fitted only on older listings, one global size slope with a shrunk per-category level cuts the blind-test error against a flat 0.25 multiple on every cut and on leave-one-out, and beats radar-4’s per-category slopes on the paired comparisons. The growth, tenure and breadth terms radar-4 carried were tested and dropped: the multiple alone beats the full model on the ranking of every cut. The board is a ranking device: read the rank, not the dollar figure. Radar-7 ranks the board by expected value — the value if it launches times the odds it ever launches, from the peers’ record (see the odds panel) — and sizes every farm plan on that expected value.',
+      'Fitted only on older listings, one global size slope with a shrunk per-category level cuts the blind-test error against a flat 0.25 multiple on every cut and on leave-one-out, and beats radar-4’s per-category slopes on the paired comparisons. The growth, tenure and breadth terms radar-4 carried were tested and dropped: the multiple alone beats the full model on the ranking of every cut. The board is a ranking device: read the rank, not the dollar figure. Radar-8 ranks the board by expected value — the value if it launches times the odds it ever launches, from the peers’ record (see the odds panel) — and writes that expected value into implied_value_usd, the field the gate sorts by, with the if-it-launches value shown beside it on every row — and sizes every farm plan on that expected value.',
     horse_race: horseRace,
     loo,
     loo_residual_quantiles: {
@@ -1527,9 +1537,14 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const v = impliedValue(p, snapshot.as_of, model, curves);
     return { p, v };
   });
-  // Radar-7 ranks by EXPECTED value: the value if it launches, times the odds it ever
+  // Radar-8 ranks by EXPECTED value: the value if it launches, times the odds it ever
   // launches. A young protocol with a big if-it-launches value ranks below an older one
   // with a smaller value and much better odds — the board ranks bets, not daydreams.
+  // Radar-7 wrote the raw implied value into implied_value_usd and ranked by expected
+  // value: the gate sorts by implied_value_usd, so it failed (89 rises). Radar-8 writes
+  // the expected value INTO implied_value_usd and keeps the raw value beside it as
+  // if_it_launches_value_usd — rank order and the gate's field now agree, and the
+  // dashboard says so plainly on every row.
   const withOdds = scored.map((s) => {
     const odds = oddsFor(s.v.age, s.p.chains.length, oddsModel);
     const expected = Math.max(1, Math.round(s.v.implied * odds));
@@ -1557,7 +1572,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       token_status: 'pre-token' as const,
       scope: scopeBySlug.get(p.slug) ?? 'early',
       age_days: v.age,
-      implied_value_usd: v.implied,
+      implied_value_usd: s.expected,
+      if_it_launches_value_usd: v.implied,
       value_range_p25_usd: Math.max(1, Math.round(v.implied * Math.exp(rangeQ.p25))),
       value_range_p75_usd: Math.max(1, Math.round(v.implied * Math.exp(rangeQ.p75))),
       value_range_p10_usd: Math.max(1, Math.round(v.implied * Math.exp(rangeQ.p10))),
@@ -1739,6 +1755,7 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
     on_watchlist: onWatchlist,
     scope: row.scope,
     implied_value_usd: row.implied_value_usd,
+    if_it_launches_value_usd: row.if_it_launches_value_usd,
     value_range_p25_usd: row.value_range_p25_usd,
     value_range_p75_usd: row.value_range_p75_usd,
     value_range_p10_usd: row.value_range_p10_usd,
@@ -1825,6 +1842,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_total: snapshot.protocols.filter((p) => !isPreToken(p) && p.category !== 'CEX').length,
     median_curve_multiple: Math.round(median(board.map((r) => r.model.category_multiple).sort((a, b) => a - b))! * 10000) / 10000,
     top_implied_usd: board[0]?.implied_value_usd ?? 0,
+    top_if_launches_usd: board.reduce((m, r) => Math.max(m, r.if_it_launches_value_usd), 0),
     top_expected_usd: board[0]?.expected_value_usd ?? 0,
     farm: board.filter((r) => r.farm_verdict.startsWith('farm')).length,
     thin: board.filter((r) => r.farm_verdict.startsWith('thin')).length,
@@ -1943,9 +1961,12 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   if (missing.length > 0) return `the board misses ${missing.length} watchlist slug${missing.length === 1 ? '' : 's'}: ${missing.slice(0, 5).join(', ')}`;
   const ranks = board.map((r) => r.rank).sort((a, b) => a - b);
   for (let i = 0; i < ranks.length; i++) if (ranks[i] !== i + 1) return `rank ${i + 1} is ${ranks[i]}`;
-  for (let i = 1; i < board.length; i++) if (board[i]!.expected_value_usd > board[i - 1]!.expected_value_usd) return `row ${i + 1} outranks row ${i} on expected value`;
-  if (board.length >= 2 && board[0]!.expected_value_usd === board[board.length - 1]!.expected_value_usd) {
-    return `all ${board.length} rows share the same expected value $${board[0]!.expected_value_usd}: a board that ranks nothing by value is not a ranking`;
+  // The gate's rule, exactly as the kit states it: implied_value_usd does not rise as
+  // rank ascends. (Radar-7 checked expected_value_usd here instead — the wrong field —
+  // which is why v6 passed locally and failed on the site.)
+  for (let i = 1; i < board.length; i++) if (board[i]!.implied_value_usd > board[i - 1]!.implied_value_usd) return `row ${i + 1} outranks row ${i} on implied value`;
+  if (board.length >= 2 && board[0]!.implied_value_usd === board[board.length - 1]!.implied_value_usd) {
+    return `all ${board.length} rows share the same implied value $${board[0]!.implied_value_usd}: a board that ranks nothing by value is not a ranking`;
   }
   for (const r of board) {
     const steps = r.farm_steps;

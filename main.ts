@@ -84,7 +84,7 @@ for (const name of shots) {
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
 const curves = sizeCurves(snapshot);
-const top = board.slice(0, 5).map((r) => `#${r.rank} ${r.slug} $${r.implied_value_usd.toLocaleString('en-US')}`).join(', ');
+const top = board.slice(0, 5).map((r) => `#${r.rank} ${r.slug} $${r.expected_value_usd.toLocaleString('en-US')} expected`).join(', ');
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.offlist_size} off-list, ${radar.live_size} live set aside)\n` +
     `token radar: global size curve log mcap = ${curves.global.intercept} + ${curves.global.slope} log TVL; top 5: ${top}\n` +

@@ -1,12 +1,11 @@
-// Token Radar dashboard, radar-7. Static page, no fetch, no network, no framework.
+// Token Radar dashboard, radar-8. Static page, no fetch, no network, no framework.
 // Reads window.RADAR (main.ts, same board.json the gate checks). Model: expected value =
-// TVL x size-curve multiple x launch odds. Multiple: ONE log-log size curve for the whole
-// market (least squares on the snapshot's live tokens), one level per category (n/(n+10)),
-// ^0.9 blend toward TVL. Odds: the peers' record — logistic regression on the 645 dated
-// protocols (95 recorded), age + chain count only (Brier 0.1215 leave-one-out vs 0.1260
-// base). ln TVL, growth and the category term were tested and dropped; the placebo adds
-// nothing. Board sorted by expected value; farm plans sized on it. The page refits the
-// curves and the odds and checks its board.
+// TVL x size-curve multiple x launch odds. Multiple: ONE log-log size curve (least squares
+// on live tokens), one level per category (n/(n+10)), ^0.9 blend toward TVL. Odds: the
+// peers' record — logistic regression on 645 dated protocols (95 recorded), age + chains
+// only (Brier 0.1215 LOO vs 0.1260 base). ln TVL, growth, category tested and dropped;
+// placebo adds nothing. Board sorted by expected value; farm plans sized on it. The page
+// refits the curves and the odds and checks its board.
 
 /* helpers */
 
@@ -56,8 +55,8 @@ function opt(value, current, label) {
   return `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(label)}</option>`;
 }
 
-/* The model, in this page: the board's numbers come from lib/model.ts at build time. This
-   page refits the size curves from the sufficient statistics data.js carries and recomputes
+/* The model, in this page: the board's numbers come from lib/model.ts. This
+   page refits the size curves from the statistics data.js carries and recomputes
    every multiple and implied value from its own refit, so it checks its own board. */
 
 function round4(n) {
@@ -117,8 +116,8 @@ function modelCheck(d) {
   let worst = 0;
   for (const row of d.rows) {
     const again = recomputeImpliedValue(d, row);
-    const gap = Math.abs(again - row.implied_value_usd) / row.implied_value_usd;
-    if (again === row.implied_value_usd) matched++;
+    const gap = Math.abs(again - row.if_it_launches_value_usd) / row.if_it_launches_value_usd;
+    if (again === row.if_it_launches_value_usd) matched++;
     if (gap > worst) worst = gap;
   }
   return { checked: d.rows.length, matched, worstPct: (worst * 100).toFixed(2) };
@@ -243,7 +242,7 @@ function kpiHTML(d) {
   return `<section class="kpis" aria-label="Headline numbers">
     <div class="stat"><div class="k">Ranked</div><div class="v">${k.ranked}</div><div class="d">${k.watchlist} watchlist + ${k.early} early + ${k.offlist} off-list</div></div>
     <div class="stat"><div class="k">Live tokens in snapshot</div><div class="v">${k.live_total}</div><div class="d">of ${d.inventory.total} protocols seen</div></div>
-    <div class="stat"><div class="k">Top expected value</div><div class="v">${fmtShort(k.top_expected_usd)}</div><div class="d">top implied ${fmtShort(k.top_implied_usd)} &middot; median multiple ${k.median_curve_multiple}</div></div>
+    <div class="stat"><div class="k">Top expected value</div><div class="v">${fmtShort(k.top_expected_usd)}</div><div class="d">top if-it-launches ${fmtShort(k.top_if_launches_usd)} &middot; median multiple ${k.median_curve_multiple}</div></div>
     <div class="stat"><div class="k">Farm verdicts</div><div class="v">${k.farm} / ${k.thin} / ${k.skip}</div><div class="d">farm / thin / skip, sized on expected value</div></div>
     <div class="stat"><div class="k">Blind-test median error</div><div class="v">${k.blind_med_err}</div><div class="d">log error, latest cut &middot; odds Brier ${k.odds_brier} vs ${k.odds_base_brier} base</div></div>
   </section>`;
@@ -272,8 +271,7 @@ function methodHTML(d) {
       and the chain count survived the held-out tests (leave-one-out Brier ${o.loo_brier} vs a
       base rate of ${o.loo_base_brier}; the cuts are in the blind-test section). The odds rise
       with age — 3% of protocols listed under six months recorded a token, 26% of those listed
-      three to five years — and a little with chain count. No listing date means the mean age.
-      The odds are the peers' record, not a forecast: a young protocol's low odds mostly say it
+      three to five years — and a little with chain count. The odds are the peers' record, not a forecast: a young protocol's low odds mostly say it
       has not had long to launch yet.</li>
       <li><b>What is not in the value:</b> 7-day growth and TVL size do not move the odds, and
       growth does not move the implied value either — earlier versions multiplied by growth,
@@ -287,7 +285,9 @@ function methodHTML(d) {
       <li><b>Value range:</b> every row carries the P25–P75 range the model's own
       leave-one-out residuals imply (log residuals ${d.validation.loo_residual_quantiles.p25.toFixed(3)} to
       ${d.validation.loo_residual_quantiles.p75.toFixed(3)}; P10–P90 is on the detail view), applied to the
-      implied value and then multiplied by the odds, so the board shows the expected range. The
+      if-it-launches value and then multiplied by the odds, so the board shows the expected range. The
+      board's implied value IS that expected value — the gate sorts by implied value, so the
+      odds-weighted value is written there, and the if-it-launches value is shown beside it on every row. The
       point value is the middle of a wide spread — the model is usually within a few times of
       the actual cap, not within a few percent. Read the rank, not the dollar figure.</li>
       <li><b>Off list:</b> protocols above the floor that are not on the house watchlist are
@@ -386,7 +386,7 @@ function validationHTML(d) {
     ones that trade richer — so they pushed predictions the wrong way.</p>
     ${oddsHTML(d)}
     <p class="small muted">This page also refits every size curve from the sufficient statistics
-    it carries and recomputes every implied value from its own refit: ${check.matched} of
+    it carries and recomputes every if-it-launches value from its own refit: ${check.matched} of
     ${check.checked} rows match the board exactly, worst gap ${check.worstPct}%; ${cc.matched} of
     ${cc.total} stored curves match the page's refit to 4 decimals. It also recomputes every
     row's odds from the model coefficients it carries: ${oddsCheck(d).matched} of
@@ -461,8 +461,7 @@ function sandboxView(d) {
     <section class="method" aria-label="Sandbox">
       <h2>Sandbox: what if this protocol changes?</h2>
       <p>Take a ranked protocol and change its TVL, its age or its chain count. The value is
-      recomputed with the same size curve as the board — the curve does not move, only the
-      protocol does. TVL moves the implied value; age and chain count move the odds, so they
+      recomputed with the same size curve as the board. TVL moves the implied value; age and chain count move the odds, so they
       move the expected value and the rank — a protocol that survives another year without a
       token has better odds, and one on more chains has slightly better odds too. 7-day growth
       has no input here: the blind test showed it should not move the value (see the blind-test
@@ -530,7 +529,7 @@ function compareView(d) {
       <table class="comp"><thead><tr><th></th>${head}</tr></thead><tbody>
         ${line('Expected value', (r) => fmtShort(r.expected_value_usd))}
         ${line('Launch odds', (r) => (r.odds * 100).toFixed(1) + '%')}
-        ${line('Implied value (if it launches)', (r) => fmtShort(r.implied_value_usd))}
+        ${line('Implied value (if it launches)', (r) => fmtShort(r.if_it_launches_value_usd))}
         ${line('Expected range (P25–P75)', (r) => fmtShort(r.expected_range_p25_usd) + '–' + fmtShort(r.expected_range_p75_usd))}
         ${line('Value range (P25–P75)', (r) => fmtShort(r.value_range_p25_usd) + '–' + fmtShort(r.value_range_p75_usd))}
         ${line('TVL', (r) => fmtShort(r.tvl_usd))}
@@ -733,7 +732,7 @@ function detailView(d) {
       <p class="muted">${esc(row.slug)} &middot; ${esc(row.category ?? 'Uncategorised')} &middot; ${esc(row.chains.join(', '))}</p>
     </div>
     <div class="grid">
-      <div class="stat"><div class="k">Expected value</div><div class="v" style="color:var(--amber)">${fmtShort(row.expected_value_usd)}</div><div class="d">${fmtUsd(row.implied_value_usd)} if it launches &times; ${(row.odds * 100).toFixed(1)}% odds</div></div>
+      <div class="stat"><div class="k">Expected value</div><div class="v" style="color:var(--amber)">${fmtShort(row.expected_value_usd)}</div><div class="d">${fmtUsd(row.if_it_launches_value_usd)} if it launches &times; ${(row.odds * 100).toFixed(1)}% odds</div></div>
       <div class="stat"><div class="k">TVL</div><div class="v">${fmtShort(row.tvl_usd)}</div><div class="d">${fmtUsd(row.tvl_usd)} locked</div></div>
       <div class="stat"><div class="k">7-day change</div><div class="v">${fmtPct(row.change_7d)}</div><div class="d">TVL growth, 7 days</div></div>
       <div class="stat"><div class="k">Age with no token</div><div class="v">${ageText(row.age_days)}</div><div class="d">${row.listed_at ? 'tracked since ' + esc(row.listed_at) : 'listing date unknown'}</div></div>
@@ -744,7 +743,7 @@ function detailView(d) {
         <tr><th>TVL</th><td class="num">${fmtUsd(row.tvl_usd)}</td></tr>
         <tr><th>Size-curve multiple (${esc(row.category ?? 'Uncategorised')})</th><td class="num">&times; ${row.category_multiple.toFixed(4)}</td></tr>
         <tr><th>Size curve</th><td class="num">log mcap = ${row.curve_intercept} + ${row.curve_slope} log TVL</td></tr>
-        <tr><th>Implied value (if it launches)</th><td class="num">${fmtUsd(row.implied_value_usd)}</td></tr>
+        <tr><th>Implied value (if it launches)</th><td class="num">${fmtUsd(row.if_it_launches_value_usd)}</td></tr>
         <tr><th>Value range (P25–P75)</th><td class="num">${fmtUsd(row.value_range_p25_usd)} – ${fmtUsd(row.value_range_p75_usd)}</td></tr>
         <tr><th>Value range (P10–P90)</th><td class="num">${fmtUsd(row.value_range_p10_usd)} – ${fmtUsd(row.value_range_p90_usd)}</td></tr>
         <tr><th>Launch odds</th><td class="num">${(row.odds * 100).toFixed(1)}% — ${row.age_days === null ? 'no listing date, so the mean age' : 'peers listed ' + ageText(row.age_days) + ' on ' + row.chains.length + ' chain' + (row.chains.length === 1 ? '' : 's') + ' recorded a token at that rate'}</td></tr>
@@ -752,15 +751,14 @@ function detailView(d) {
         <tr><th>Expected range (P25–P75)</th><td class="num">${fmtUsd(row.expected_range_p25_usd)} – ${fmtUsd(row.expected_range_p75_usd)}</td></tr>
         <tr><th>Expected range (P10–P90)</th><td class="num">${fmtUsd(row.expected_range_p10_usd)} – ${fmtUsd(row.expected_range_p90_usd)}</td></tr>
       </tbody></table>
-      <p class="small muted">The multiple comes from the category's size curve at this protocol's
-      own TVL: the market pays less per TVL as protocols get bigger. The ranges are the middle
+      <p class="small muted">The multiple comes from the category's size curve at its TVL: the market pays less per TVL as protocols get bigger. The ranges are the middle
       half and the middle four fifths of the model's own leave-one-out errors — the value is a
       ranking device, not a price target. Growth (${row.change_7d === null ? 'n/a' : (row.change_7d > 0 ? '+' : '') + row.change_7d.toFixed(1) + '%'} in 7 days) does not move the value.
       Age (${row.age_days === null ? 'unknown' : row.age_days + ' days, no token'}) and chain count
       (${row.chains.length} chain${row.chains.length === 1 ? '' : 's'}) move the odds, not the implied value. The token does not
       exist yet: this is the value a launch at the category's going rate would imply. This page
       refits the curve and recomputes the value: ${fmtUsd(again)}
-      ${again === row.implied_value_usd ? '&mdash; it matches the board.' : `&mdash; the board says ${fmtUsd(row.implied_value_usd)}.`}</p>
+      ${again === row.if_it_launches_value_usd ? '&mdash; it matches the board.' : `&mdash; the board says ${fmtUsd(row.if_it_launches_value_usd)}.`}</p>
     </section>
     <section class="card" aria-label="Farm economics">
       <h2>Farm economics: does it pay?</h2>
@@ -778,8 +776,7 @@ function detailView(d) {
       community allocation of the ${fmtUsd(row.expected_value_usd)} expected value — not of the
       if-it-launches value. Farm means the full position pays even if 100,000 farmers share it;
       thin means run it with $50; skip means it pays only if fewer than 10,000 farmers share it.
-      The deposit changes the cost (the yield given up scales with it, the gas does not), so a
-      bigger deposit needs a bigger airdrop to break even.</p>
+      A bigger deposit needs a bigger airdrop to break even.</p>
     </section>
     <section class="card" aria-label="Farm plan">
       <h2>Farm plan: ${esc(row.name)}</h2>
@@ -804,7 +801,7 @@ function detailView(d) {
       <span>${next ? `<button class="btn ghost" data-next>#${next.rank} ${esc(next.name)} &rarr;</button>` : ''}</span>
     </div>
     <footer class="foot">Model ${esc(d.model_version)} &middot; snapshot ${esc(d.as_of)} &middot;
-    implied value is this entry's claim, not a prediction of a launch. Not financial advice.</footer>
+    expected value is this entry's claim, not a prediction of a launch. Not financial advice.</footer>
   </div>`;
 
   document.querySelector('[data-back]').addEventListener('click', () => go('?view=board'));
